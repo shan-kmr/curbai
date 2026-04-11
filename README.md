@@ -3,10 +3,8 @@ title: CurbAI
 emoji: 🛰️
 colorFrom: yellow
 colorTo: red
-sdk: streamlit
-sdk_version: 1.39.0
-python_version: "3.11"
-app_file: app.py
+sdk: docker
+app_port: 7860
 pinned: false
 short_description: Block-level scoring for autonomous mobility
 license: mit
