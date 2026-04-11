@@ -257,17 +257,6 @@ st.markdown(
 - **Similarity is first-order.** The FAISS index is over raw z-scored
   features; a learned foundation-model embedding would capture interactions
   that a linear z-score cannot.
-
-**Where this grows next.**
-
-- Add NYC, LA, Austin, Phoenix. All of the above are one config-line
-  changes given the current pipeline.
-- Replace the POI-density demand proxy with real ride-drop telemetry if the
-  data were available.
-- Backtest the scores against a held-out ride-drop dataset, then use the
-  backtest to learn the weights instead of setting them by hand.
-- Hot-swap the similarity index for learned cell embeddings from a
-  multimodal geo foundation model.
 """
 )
 
