@@ -1,3 +1,17 @@
+---
+title: CurbAI
+emoji: 🛰️
+colorFrom: yellow
+colorTo: red
+sdk: streamlit
+sdk_version: 1.39.0
+python_version: "3.11"
+app_file: app.py
+pinned: false
+short_description: Block-level scoring for autonomous mobility
+license: mit
+---
+
 # CurbAI
 
 **Block-level scoring for autonomous mobility.** Tells you where in a city the next autonomous ride service should launch, where an autonomous delivery robot can actually drop a package, and which ride drop-offs have the biggest food-delivery conversion upside — one map, three scores, built on open data. Scope: San Francisco v1.

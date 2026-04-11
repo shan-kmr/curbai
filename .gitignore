@@ -9,11 +9,11 @@ __pycache__/
 # OSMnx HTTP response cache (auto-populated on fetch)
 cache/
 
-# Data: re-creatable from bootstrap_data.py + fetch_osm.py + build_sf.py
+# Re-creatable raw data — too large / irrelevant to check in
 data/raw/
-data/sf_scored.parquet
-data/*.parquet
 data/*.pkl
+
+# data/sf_scored.parquet IS checked in (98 KB) so the app boots on fresh clones
 
 # Secrets
 .streamlit/secrets.toml
