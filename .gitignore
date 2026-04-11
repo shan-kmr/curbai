@@ -1,0 +1,20 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# OSMnx HTTP response cache (auto-populated on fetch)
+cache/
+
+# Data: re-creatable from bootstrap_data.py + fetch_osm.py + build_sf.py
+data/raw/
+data/sf_scored.parquet
+data/*.parquet
+data/*.pkl
+
+# Secrets
+.streamlit/secrets.toml
+.env
