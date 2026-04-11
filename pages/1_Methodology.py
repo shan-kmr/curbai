@@ -8,7 +8,7 @@ import streamlit as st
 from curbai import scoring
 
 st.set_page_config(
-    page_title="CurbAI — Methodology",
+    page_title="CurbIndex — Methodology",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="auto",
@@ -33,12 +33,12 @@ st.markdown("---")
 st.markdown("## Data sources")
 st.markdown(
     """
-CurbAI uses open data only. No API keys, no proprietary feeds. The full data
+CurbIndex uses open data only. No API keys, no proprietary feeds. The full data
 pipeline runs in three scripts, each emitting files into `data/raw/`:
 
 | Script | What it does | Time |
 |---|---|---|
-| `scripts/bootstrap_data.py` | One-time copy of the SF subset of a sibling H3 cell grid (1,112 cells) and 51,572 Overture Maps POIs for the SF bounding box. After this runs once, CurbAI is fully standalone. | <30 s |
+| `scripts/bootstrap_data.py` | One-time copy of the SF subset of a sibling H3 cell grid (1,112 cells) and 51,572 Overture Maps POIs for the SF bounding box. After this runs once, CurbIndex is fully standalone. | <30 s |
 | `scripts/fetch_osm.py` | Pulls OpenStreetMap data for the SF bbox via OSMnx: the drive road network (9,890 nodes / 27,261 edges), 158,765 building footprints, 7,415 transit stops, and 15,571 amenities. | ~1–2 min |
 | `scripts/build_sf.py` | Bins everything into H3 resolution-9 cells, computes 13 per-cell features, applies the three scoring functions, and writes `data/sf_scored.parquet`. | ~30 s |
 """

@@ -32,7 +32,7 @@ from curbai.loader import SCORED_PATH, feature_columns, load_sf_scored
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="CurbAI — block-level scoring for autonomous mobility",
+    page_title="CurbIndex — block-level scoring for autonomous mobility",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="auto",
@@ -458,7 +458,7 @@ def render_tab(
 
 
 def render_header() -> None:
-    st.markdown("# CurbAI")
+    st.markdown("# CurbIndex")
     st.caption(
         "Block-level scoring for autonomous mobility. One H3 resolution-9 "
         "grid over San Francisco, three scoring functions per cell: where "
