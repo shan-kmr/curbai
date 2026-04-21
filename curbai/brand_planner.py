@@ -120,3 +120,96 @@ def compute_opportunity(
 def category_display_name(cat: str) -> str:
     """Convert Overture category slug to a readable name."""
     return cat.replace("_", " ").replace("and ", "& ").title()
+
+
+# ---------------------------------------------------------------------------
+# Nearest competitors (POI-level detail for the side panel)
+# ---------------------------------------------------------------------------
+
+
+_EARTH_R_M = 6_371_008.8
+_COMPASS_8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def _haversine_m(
+    lat1: float, lon1: float, lat2: np.ndarray, lon2: np.ndarray
+) -> np.ndarray:
+    """Vectorized haversine distance in meters from one point to an array."""
+    lat1_r = np.radians(lat1)
+    lon1_r = np.radians(lon1)
+    lat2_r = np.radians(lat2)
+    lon2_r = np.radians(lon2)
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_r) * np.cos(lat2_r) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * _EARTH_R_M * np.arcsin(np.sqrt(a))
+
+
+def _bearing_to_cardinal(lat1: float, lon1: float, lat2: float, lon2: float) -> str:
+    """Initial bearing from (lat1, lon1) to (lat2, lon2), bucketed to 8 compass points."""
+    lat1_r = np.radians(lat1)
+    lat2_r = np.radians(lat2)
+    dlon_r = np.radians(lon2 - lon1)
+    y = np.sin(dlon_r) * np.cos(lat2_r)
+    x = np.cos(lat1_r) * np.sin(lat2_r) - np.sin(lat1_r) * np.cos(lat2_r) * np.cos(dlon_r)
+    bearing = (np.degrees(np.arctan2(y, x)) + 360.0) % 360.0
+    idx = int(((bearing + 22.5) % 360.0) // 45.0)
+    return _COMPASS_8[idx]
+
+
+def nearest_competitors(
+    category: str,
+    h3_id: str,
+    pois_df: pd.DataFrame,
+    cells_df: pd.DataFrame,
+    k: int = 5,
+    max_m: float = 1500.0,
+) -> list[dict]:
+    """Return the k nearest POIs of `category` to the selected cell's center.
+
+    Each dict has `name`, `distance_m` (int meters), `direction` (N/NE/.../NW).
+    POIs with no name render as "(unnamed)".
+    """
+    cell = cells_df[cells_df["h3_index"] == h3_id]
+    if len(cell) == 0:
+        return []
+    center_lat = float(cell["center_lat"].iloc[0])
+    center_lon = float(cell["center_lon"].iloc[0])
+
+    sub = pois_df[pois_df["category"] == category]
+    sub = sub.dropna(subset=["lat", "lon"])
+    if len(sub) == 0:
+        return []
+
+    lats = sub["lat"].to_numpy(dtype=np.float64)
+    lons = sub["lon"].to_numpy(dtype=np.float64)
+    dists = _haversine_m(center_lat, center_lon, lats, lons)
+
+    mask = dists <= max_m
+    if not mask.any():
+        return []
+
+    idx_sorted = np.argsort(dists[mask])[:k]
+    sub_masked = sub.loc[mask]
+    names = sub_masked["name"].to_numpy() if "name" in sub_masked.columns else np.array([""] * len(sub_masked))
+    lat_masked = lats[mask]
+    lon_masked = lons[mask]
+    dist_masked = dists[mask]
+
+    out: list[dict] = []
+    for i in idx_sorted:
+        raw_name = names[i]
+        if raw_name is None or (isinstance(raw_name, float) and np.isnan(raw_name)) or str(raw_name).strip() == "" or str(raw_name) == "nan":
+            display_name = "(unnamed)"
+        else:
+            display_name = str(raw_name)
+        out.append(
+            {
+                "name": display_name,
+                "distance_m": int(round(float(dist_masked[i]))),
+                "direction": _bearing_to_cardinal(
+                    center_lat, center_lon, float(lat_masked[i]), float(lon_masked[i])
+                ),
+            }
+        )
+    return out

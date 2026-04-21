@@ -28,7 +28,7 @@ import shapely.wkb
 CURBAI_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CURBAI_ROOT))
 
-from curbai import scoring  # noqa: E402
+from curbai import catchment, scoring, temporal  # noqa: E402
 
 DATA_RAW = CURBAI_ROOT / "data" / "raw"
 DATA_OUT = CURBAI_ROOT / "data"
@@ -234,11 +234,49 @@ def main() -> None:
         f"character: mean {scored['score_character'].mean():.3f} max {scored['score_character'].max():.3f}"
     )
 
-    # --- write ----
+    # --- temporal activity profile (morning / midday / evening / late_night) ----
+    temporal_df = temporal.compute_temporal_profile(scored)
+    for col in temporal_df.columns:
+        scored[col] = temporal_df[col].values
+    log(
+        "temporal — "
+        f"morning μ {scored['activity_morning'].mean():.2f} "
+        f"midday μ {scored['activity_midday'].mean():.2f} "
+        f"evening μ {scored['activity_evening'].mean():.2f} "
+        f"late_night μ {scored['activity_late_night'].mean():.2f}"
+    )
+
+    # --- write scored grid ----
     DATA_OUT.mkdir(parents=True, exist_ok=True)
     scored.to_parquet(OUT, index=False)
     log(f"wrote {OUT} ({OUT.stat().st_size / 1e6:.1f} MB) — {len(scored):,} rows, {len(scored.columns)} cols")
     log(f"columns: {list(scored.columns)}")
+
+    # --- slim POI parquet for runtime (nearest-competitor lookups) ----
+    if pois_path.exists():
+        pois_all = pd.read_parquet(pois_path)
+        keep_cols = [c for c in ("lat", "lon", "category", "name") if c in pois_all.columns]
+        pois_slim = pois_all[keep_cols].dropna(subset=["lat", "lon", "category"]).copy()
+        slim_out = DATA_OUT / "pois_sf.parquet"
+        pois_slim.to_parquet(slim_out, index=False)
+        log(
+            f"wrote {slim_out} ({slim_out.stat().st_size / 1e6:.1f} MB) — "
+            f"{len(pois_slim):,} rows (lat/lon/category/name)"
+        )
+
+    # --- pickle OSM road graph for walk-time catchment ----
+    roads_gpkg = DATA_RAW / "osm" / "sf_roads.gpkg"
+    if roads_gpkg.exists():
+        log("building road graph for walk-time catchment...")
+        G = catchment.build_road_graph_from_gpkg(roads_gpkg)
+        graph_out = DATA_OUT / "road_graph.pkl"
+        catchment.pickle_graph(G, graph_out)
+        log(
+            f"wrote {graph_out} ({graph_out.stat().st_size / 1e6:.1f} MB) — "
+            f"{G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges"
+        )
+    else:
+        log(f"WARN: {roads_gpkg} missing; skipping road graph pickle")
 
 
 if __name__ == "__main__":

@@ -121,6 +121,54 @@ st.markdown("""
 - **mixed_use** — `norm(category_entropy)`. Residential × commercial × service = a living neighborhood.
 """)
 
+st.markdown("### 4. Temporal Patterns")
+st.markdown("*When is this block alive?*")
+st.markdown("""
+A category-derived activity profile across four time buckets. Each bucket is a
+weighted sum of normalized (5th/95th min-max) POI counts — the POI mix tells us
+*when* a block is busy, without needing any first-party signal.
+
+```
+activity_morning    = 0.5·norm(transit_stops) + 0.3·norm(intersections) + 0.2·norm(shops)
+activity_midday     = 0.4·norm(restaurants)   + 0.3·norm(shops)         + 0.3·norm(amenities)
+activity_evening    = 0.4·norm(nightlife)     + 0.3·norm(restaurants)   + 0.3·norm(amenities)
+activity_late_night = 0.7·norm(nightlife)     + 0.3·norm(restaurants)
+```
+
+This is the tab where the open-data vs first-party gap is widest: we're *inferring
+when from what* (category composition). The first-party version is Snap Map's
+heat map — actual device density per cell per hour, refreshed every 15 minutes.
+""")
+
+# ---------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("## Walk-time catchment")
+st.markdown("""
+When you click a cell on any tab, the map tints the neighboring cells reachable
+within 5 / 10 / 15 minutes on foot. The side panel rolls those cells up into a
+POI count — "~X POIs reachable in a 10-minute walk."
+
+The computation is a single-source Dijkstra on the OSMnx drive graph
+(9,890 nodes, 16,216 undirected edges) with `length` (meters) as the edge
+weight:
+
+```
+src            = nearest_node(cell_center_lat, cell_center_lon)
+cutoff_meters  = max_minutes × 80          # 80 m/min ≈ 4.8 km/h
+lengths        = nx.single_source_dijkstra_path_length(G, src, cutoff, weight='length')
+walk_time_min  = lengths[node] / 80
+```
+
+Each reachable graph node is binned back to its H3 cell with `h3.geo_to_h3`;
+the cell's walk-time is the minimum across nodes inside it. The graph is
+pickled once during `build_sf.py` and loaded at app boot via `@st.cache_resource`
+for sub-10 ms per-cell queries.
+
+Catchment / trade-area analysis is the core of what Placer.ai charges six
+figures for. The open-data version uses road-network walking distance. The
+first-party version uses actual origin-destination trip flows.
+""")
+
 # ---------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("## What first-party location data would unlock")
@@ -144,6 +192,9 @@ upgrade = pd.DataFrame([
     ("Neighborhood Character", "safety_perception", "safety_count + nightlife", "Behavioral signal: do people actually walk through this area after dark?"),
     ("Neighborhood Character", "evening_vibrancy", "nightlife + restaurant count", "Hour-by-hour user density curve — is this block alive at 9pm on a Thursday?"),
     ("Neighborhood Character", "amenity_walkability", "amenity + shop count", "Which amenities residents actually USE (visit dwell > 5 min) vs just exist on the map"),
+    ("Temporal Patterns", "activity_by_hour", "category-derived time-of-day estimates (office → morning, nightlife → evening)", "Actual device-density per cell per hour, refreshed every 15 minutes, from 470M MAU"),
+    ("Brand Planner", "nearest_competitors", "POI names + Euclidean distance from Overture Maps", "Visit-share per competitor — Philz gets 45%, Blue Bottle 30% — plus actual weekly visit volume"),
+    ("All tabs", "walk_time_catchment", "road-network walking distance (OSMnx shortest path, 4.8 km/h)", "Actual origin-destination trip flows — we don't estimate who COULD walk here, we know who DOES walk here"),
 ], columns=["tab", "component", "open-data proxy (current)", "first-party upgrade"])
 st.dataframe(upgrade, hide_index=True, use_container_width=True)
 
@@ -186,7 +237,7 @@ st.markdown("## Limitations")
 st.markdown("""
 - **Demand is a proxy.** POI count and amenity density stand in for actual foot traffic and commercial demand. Swapping in real visitation data would change rankings in purely residential areas.
 - **Normalization is city-local.** A "high" score in SF does not compare directly to a "high" score in NYC. Cross-city comparison requires re-fitting on a pooled city set or using globally-fit embeddings.
-- **No temporal layer yet.** Evening vibrancy approximates time-of-day patterns via nightlife count, but hour-level demand curves require longitudinal data.
+- **Temporal profile is a category-derived proxy.** The four buckets (morning / midday / evening / late night) are a weighted sum of POI categories — not a measurement. Hour-level demand curves require longitudinal device signals or mobility data.
 - **Safety is a proxy.** Police/hospital count is a poor proxy for street-level safety. Production use would require open incident data (e.g. SFPD CAD data via DataSF).
 - **Similarity is first-order.** Linear z-score, not a learned embedding. A multimodal foundation model would capture feature interactions.
 """)

@@ -22,8 +22,14 @@ import streamlit as st
 from geopy.exc import GeopyError
 from geopy.geocoders import Nominatim
 
-from curbai import brand_planner, scoring, similarity
-from curbai.loader import SCORED_PATH, feature_columns, load_sf_scored
+from curbai import brand_planner, catchment, scoring, similarity, temporal
+from curbai.loader import (
+    SCORED_PATH,
+    feature_columns,
+    load_pois_sf,
+    load_road_graph,
+    load_sf_scored,
+)
 
 st.set_page_config(
     page_title="CurbIndex — geospatial intelligence for urban mobility",
@@ -58,6 +64,28 @@ def get_similarity_index(df: pd.DataFrame):
 @st.cache_data(show_spinner="Loading category data…")
 def get_categories() -> list[str]:
     return brand_planner.list_categories(min_count=10)
+
+
+@st.cache_data(show_spinner="Loading POIs…")
+def get_pois() -> pd.DataFrame:
+    return load_pois_sf()
+
+
+@st.cache_resource(show_spinner="Loading walk-network…")
+def get_road_graph():
+    return load_road_graph()
+
+
+@st.cache_data(show_spinner=False)
+def compute_catchment(h3_id: str, max_minutes: int = 15) -> dict[str, float]:
+    """Dijkstra walk-time from h3_id; cached per selected cell.
+
+    Streamlit's @st.cache_data hashes the args — the road graph and cells df
+    are fetched inside so the cache key stays small.
+    """
+    G = get_road_graph()
+    df = get_data()
+    return catchment.walk_time_cells(h3_id, G, df, max_minutes=max_minutes)
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +175,23 @@ def parse_pydeck_selection(event, current_focus: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _catchment_color(minutes: float) -> list[int]:
+    """Translucent teal tint by walk-time bucket (closer = more opaque)."""
+    if minutes <= 5:
+        return [100, 210, 230, 150]
+    if minutes <= 10:
+        return [100, 210, 230, 90]
+    if minutes <= 15:
+        return [100, 210, 230, 50]
+    return [0, 0, 0, 0]
+
+
 def build_deck(
-    df: pd.DataFrame, score_col: str, title: str, focus_h3: str | None
+    df: pd.DataFrame,
+    score_col: str,
+    title: str,
+    focus_h3: str | None,
+    catchment_walk_times: dict[str, float] | None = None,
 ) -> pdk.Deck:
     df = df.copy()
     df["_color"] = df[score_col].apply(score_to_color)
@@ -172,6 +215,25 @@ def build_deck(
             coverage=0.92,
         )
     ]
+    if catchment_walk_times:
+        catch_rows = [
+            {"h3_index": h, "_catch_color": _catchment_color(t)}
+            for h, t in catchment_walk_times.items()
+        ]
+        catch_df = pd.DataFrame(catch_rows)
+        layers.append(
+            pdk.Layer(
+                "H3HexagonLayer",
+                id="catchment",
+                data=catch_df,
+                get_hexagon="h3_index",
+                get_fill_color="_catch_color",
+                extruded=False,
+                pickable=False,
+                coverage=1.0,
+                stroked=False,
+            )
+        )
     if focus_df is not None and len(focus_df) > 0:
         layers.append(
             pdk.Layer(
@@ -220,6 +282,41 @@ def build_deck(
 # ---------------------------------------------------------------------------
 
 
+def render_temporal_strip(row: pd.Series) -> None:
+    """Compact 4-bar time-of-day strip for a single cell row."""
+    missing = [c for c in temporal.temporal_columns() if c not in row.index]
+    if missing:
+        return
+    st.markdown("#### Time-of-day activity")
+    st.caption("Category-derived estimate · 0–1 scale")
+    bars = pd.DataFrame(
+        {
+            "bucket": [temporal.bucket_display_name(b) for b in temporal.TEMPORAL_BUCKETS],
+            "activity": [float(row[f"activity_{b}"]) for b in temporal.TEMPORAL_BUCKETS],
+        }
+    )
+    st.bar_chart(bars, x="bucket", y="activity", height=180, use_container_width=True)
+
+
+def render_catchment_summary(focus_h3: str, df: pd.DataFrame) -> None:
+    """Show 5/10/15-min walk-time reach for the focused cell."""
+    walk_times = compute_catchment(focus_h3, max_minutes=15)
+    if not walk_times:
+        return
+    summary = catchment.catchment_summary(walk_times, df)
+    st.markdown("#### Walk-time catchment")
+    st.caption("Road-network Dijkstra · 4.8 km/h (80 m/min)")
+    cols = st.columns(3)
+    for col, minutes in zip(cols, (5, 10, 15)):
+        bucket = summary[f"{minutes}_min"]
+        col.metric(
+            label=f"{minutes}-min walk",
+            value=f"{bucket['n_cells']} cells",
+            delta=f"{bucket['n_pois']:,} POIs",
+            delta_color="off",
+        )
+
+
 def render_breakdown(
     df: pd.DataFrame,
     scoring_fn: Callable,
@@ -244,6 +341,8 @@ def render_breakdown(
         val = float(comps[name].iloc[0])
         st.progress(min(max(val, 0.0), 1.0), text=f"{name.replace('_', ' ')}  ·  w={w:.2f}  ·  {w * val:.3f}")
 
+    render_temporal_strip(row_df.iloc[0])
+
     st.markdown("#### Raw features")
     raw_cols = [c for c in [
         "poi_count", "unique_categories", "category_entropy",
@@ -255,7 +354,9 @@ def render_breakdown(
     st.dataframe(raw, hide_index=True, use_container_width=True)
 
 
-def render_brand_breakdown(opp_df: pd.DataFrame, category: str, h3_id: str) -> None:
+def render_brand_breakdown(
+    opp_df: pd.DataFrame, category: str, h3_id: str, pois_df: pd.DataFrame | None = None
+) -> None:
     row = opp_df[opp_df["h3_index"] == h3_id]
     if len(row) == 0:
         st.warning("Cell not found.")
@@ -283,6 +384,19 @@ def render_brand_breakdown(opp_df: pd.DataFrame, category: str, h3_id: str) -> N
         st.info(f"No {cat_display} in this cell, but {int(r['cat_count_kring'])} nearby — moderate opportunity.")
     else:
         st.caption(f"{int(r['cat_count_cell'])} already here. Opportunity score reflects saturation.")
+
+    if pois_df is not None:
+        competitors = brand_planner.nearest_competitors(
+            category, h3_id, pois_df, opp_df, k=5, max_m=1500
+        )
+        if competitors:
+            st.markdown("#### Nearest competitors")
+            for c in competitors:
+                st.markdown(f"- **{c['name']}**  · ~{c['distance_m']} m {c['direction']}")
+            st.caption(
+                "Open-data: names + Euclidean distance. First-party upgrade: "
+                "visit-share per competitor."
+            )
 
 
 def render_similar(
@@ -361,13 +475,17 @@ def render_static_tab(
     with left:
         render_controls(df, score_col, key)
         focus_h3 = st.session_state.get("focus_h3")
-        deck = build_deck(df, score_col, title, focus_h3)
+        walk_times = compute_catchment(focus_h3) if focus_h3 else None
+        deck = build_deck(df, score_col, title, focus_h3, catchment_walk_times=walk_times)
         event = st.pydeck_chart(deck, use_container_width=True, height=580, on_select="rerun", selection_mode="single-object", key=f"deck_{key}")
         new_focus = parse_pydeck_selection(event, focus_h3)
         if new_focus:
             set_focus(new_focus)
             st.rerun()
-        st.caption(f"Click any hex to select. {len(df):,} H3 res-9 cells. Cocoa = low, cream = high.")
+        st.caption(
+            f"Click any hex to select. {len(df):,} H3 res-9 cells. Cocoa = low, cream = high. "
+            "Selected cell tints a teal walk-time ring (5/10/15 min)."
+        )
 
     with right:
         focus_h3 = st.session_state.get("focus_h3")
@@ -377,6 +495,8 @@ def render_static_tab(
         else:
             st.caption("Selected cell. Click another hex to change.")
         render_breakdown(df, scoring_fn, weights, title, focus_h3)
+        st.markdown("---")
+        render_catchment_summary(focus_h3, df)
         st.markdown("---")
         render_similar(df, sim, focus_h3, score_col)
 
@@ -443,7 +563,14 @@ def render_brand_planner_tab(
                 set_focus(str(match["h3_index"].iloc[0]))
 
         focus_h3 = st.session_state.get("focus_h3")
-        deck = build_deck(opp_df, "opportunity", f"Opportunity: {selected_display}", focus_h3)
+        walk_times = compute_catchment(focus_h3) if focus_h3 else None
+        deck = build_deck(
+            opp_df,
+            "opportunity",
+            f"Opportunity: {selected_display}",
+            focus_h3,
+            catchment_walk_times=walk_times,
+        )
         event = st.pydeck_chart(deck, use_container_width=True, height=580, on_select="rerun", selection_mode="single-object", key="deck_brand")
         new_focus = parse_pydeck_selection(event, focus_h3)
         if new_focus:
@@ -465,9 +592,107 @@ def render_brand_planner_tab(
             st.caption("Showing top opportunity cell. Click the map to inspect.")
         else:
             st.caption("Selected cell.")
-        render_brand_breakdown(opp_df, selected_cat, focus_h3)
+        try:
+            pois_df = get_pois()
+        except FileNotFoundError:
+            pois_df = None
+        render_brand_breakdown(opp_df, selected_cat, focus_h3, pois_df=pois_df)
+        st.markdown("---")
+        render_catchment_summary(focus_h3, base_df)
         st.markdown("---")
         render_similar(base_df, sim, focus_h3, "score_site")
+
+
+# ---------------------------------------------------------------------------
+# Temporal Patterns tab
+# ---------------------------------------------------------------------------
+
+
+def render_temporal_tab(df: pd.DataFrame, sim: similarity.SimilarityIndex) -> None:
+    st.markdown("### Temporal Patterns")
+    st.caption(
+        "When is this block alive? A category-derived activity profile for "
+        "four time buckets. Open-data primitive — the first-party version is "
+        "actual device-density per cell per hour."
+    )
+
+    temporal_cols = temporal.temporal_columns()
+    missing = [c for c in temporal_cols if c not in df.columns]
+    if missing:
+        st.error(
+            f"Missing temporal columns {missing}. Re-run `python scripts/build_sf.py`."
+        )
+        return
+
+    left, right = st.columns([2, 1], gap="large")
+
+    with left:
+        bucket_labels = {b: temporal.bucket_display_name(b) for b in temporal.TEMPORAL_BUCKETS}
+        default_bucket = "evening"
+        selected_label = st.radio(
+            "Time bucket",
+            options=[bucket_labels[b] for b in temporal.TEMPORAL_BUCKETS],
+            index=temporal.TEMPORAL_BUCKETS.index(default_bucket),
+            horizontal=True,
+            key="temporal_bucket",
+        )
+        selected_bucket = next(
+            b for b, lbl in bucket_labels.items() if lbl == selected_label
+        )
+        score_col = f"activity_{selected_bucket}"
+
+        render_controls(df, score_col, "temporal")
+        focus_h3 = st.session_state.get("focus_h3")
+        walk_times = compute_catchment(focus_h3) if focus_h3 else None
+        deck = build_deck(
+            df,
+            score_col,
+            f"Activity — {bucket_labels[selected_bucket]}",
+            focus_h3,
+            catchment_walk_times=walk_times,
+        )
+        event = st.pydeck_chart(
+            deck,
+            use_container_width=True,
+            height=580,
+            on_select="rerun",
+            selection_mode="single-object",
+            key="deck_temporal",
+        )
+        new_focus = parse_pydeck_selection(event, focus_h3)
+        if new_focus:
+            set_focus(new_focus)
+            st.rerun()
+        st.caption(
+            "Morning = transit + intersections + shops. "
+            "Midday = restaurants + shops + amenities. "
+            "Evening = nightlife + restaurants + amenities. "
+            "Late night = nightlife + restaurants."
+        )
+
+    with right:
+        focus_h3 = st.session_state.get("focus_h3")
+        if focus_h3 is None:
+            focus_h3 = str(df.nlargest(1, score_col)["h3_index"].iloc[0])
+            st.caption("Showing top-activity cell. Click the map to inspect others.")
+        else:
+            st.caption("Selected cell.")
+
+        row = df[df["h3_index"] == focus_h3]
+        if len(row) > 0:
+            r = row.iloc[0]
+            st.markdown(f"### `{focus_h3[-12:]}`")
+            st.caption(f"{r['center_lat']:.5f}, {r['center_lon']:.5f}")
+            st.metric(
+                label=f"Activity — {bucket_labels[selected_bucket]}",
+                value=f"{float(r[score_col]) * 100:.1f} / 100",
+            )
+            render_temporal_strip(r)
+
+        st.markdown("---")
+        render_catchment_summary(focus_h3, df)
+        st.markdown("---")
+        render_similar(df, sim, focus_h3, score_col)
 
 
 # ---------------------------------------------------------------------------
@@ -494,10 +719,11 @@ def main() -> None:
     )
     st.markdown("")
 
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "Site Intelligence",
         "Brand Location Planner",
         "Neighborhood Character",
+        "Temporal Patterns",
     ])
 
     with tab1:
@@ -524,6 +750,9 @@ def main() -> None:
             weights=scoring.CHARACTER_WEIGHTS,
             key="character",
         )
+
+    with tab4:
+        render_temporal_tab(df, sim)
 
 
 if __name__ == "__main__":

@@ -12,9 +12,13 @@ cache/
 # Re-creatable raw data — too large / irrelevant to check in
 data/raw/
 data/*.pkl
+!data/road_graph.pkl
 
-# data/sf_scored.parquet and data/category_counts_sf.parquet ARE checked in
-# (small, needed at runtime) so the app boots on fresh clones
+# These are checked in (small, needed at runtime) so the app boots on fresh clones:
+#   data/sf_scored.parquet         — scored H3 grid (1,112 cells)
+#   data/category_counts_sf.parquet — per-category POI counts (Brand Planner)
+#   data/pois_sf.parquet           — slim POI parquet (nearest-competitor lookups)
+#   data/road_graph.pkl            — pickled OSM walk graph (walk-time catchment)
 
 # Secrets
 .streamlit/secrets.toml
