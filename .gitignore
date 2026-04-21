@@ -13,7 +13,8 @@ cache/
 data/raw/
 data/*.pkl
 
-# data/sf_scored.parquet IS checked in (98 KB) so the app boots on fresh clones
+# data/sf_scored.parquet and data/category_counts_sf.parquet ARE checked in
+# (small, needed at runtime) so the app boots on fresh clones
 
 # Secrets
 .streamlit/secrets.toml

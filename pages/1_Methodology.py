@@ -1,4 +1,4 @@
-"""Methodology page — data sources, feature engineering, scoring formulas."""
+"""Methodology — data sources, scoring formulas, and the first-party data upgrade path."""
 
 from __future__ import annotations
 
@@ -14,274 +14,192 @@ st.set_page_config(
     initial_sidebar_state="auto",
 )
 
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-
 st.markdown("# Methodology")
 st.caption(
-    "Data sources, feature engineering, scoring formulas, and limitations. "
-    "Everything on this page is reproducible from the scripts in the repo."
+    "Data sources, feature engineering, scoring formulas, and what first-party "
+    "location data would unlock on top of this open-data baseline."
 )
 
+# ---------------------------------------------------------------------------
 st.markdown("---")
+st.markdown("## What you're looking at")
+st.markdown("""
+One H3 resolution-9 grid over San Francisco (~174 m edge, 1,112 cells), three
+tabs demonstrating three commercial applications of block-level geospatial
+intelligence — all built on open data, all reproducible, all running live.
+""")
 
 # ---------------------------------------------------------------------------
-# Data sources
-# ---------------------------------------------------------------------------
-
+st.markdown("---")
 st.markdown("## Data sources")
-st.markdown(
-    """
-CurbIndex uses open data only. No API keys, no proprietary feeds. The full data
-pipeline runs in three scripts, each emitting files into `data/raw/`:
+st.markdown("""
+CurbIndex uses open data only. No API keys, no proprietary feeds.
 
 | Script | What it does | Time |
 |---|---|---|
-| `scripts/bootstrap_data.py` | One-time copy of the SF subset of a sibling H3 cell grid (1,112 cells) and 51,572 Overture Maps POIs for the SF bounding box. After this runs once, CurbIndex is fully standalone. | <30 s |
-| `scripts/fetch_osm.py` | Pulls OpenStreetMap data for the SF bbox via OSMnx: the drive road network (9,890 nodes / 27,261 edges), 158,765 building footprints, 7,415 transit stops, and 15,571 amenities. | ~1–2 min |
-| `scripts/build_sf.py` | Bins everything into H3 resolution-9 cells, computes 13 per-cell features, applies the three scoring functions, and writes `data/sf_scored.parquet`. | ~30 s |
-"""
-)
+| `scripts/bootstrap_data.py` | One-time copy of the SF subset of an H3 cell grid (1,112 cells) and 51,572 Overture Maps POIs for the SF bbox. After this runs once, CurbIndex is fully standalone. | <30 s |
+| `scripts/fetch_osm.py` | Pulls OpenStreetMap data for SF via OSMnx: drive road network (9,890 nodes / 27,261 edges), 158,765 building footprints, 7,415 transit stops, 15,571 amenities. | ~2 min |
+| `scripts/build_sf.py` | Bins everything into H3 cells, computes 13 per-cell features, produces per-category POI counts (1,238 categories), and applies the scoring functions. | ~30 s |
 
-st.markdown("**San Francisco bounding box**")
-st.code("[-122.52, 37.71, -122.36, 37.83]  # (west, south, east, north)")
-
-st.markdown(
-    """
-**Granularity.** H3 resolution 9 cells average ~0.105 km² and have an edge
-length of ~174 m — small enough that a single cell corresponds to a recognizable
-block, large enough to smooth out noise in sparse features like transit stops.
-The full SF coverage at res-9 is 1,112 cells.
-"""
-)
+**San Francisco bbox:** `[-122.52, 37.71, -122.36, 37.83]`
+""")
 
 # ---------------------------------------------------------------------------
-# Feature engineering
-# ---------------------------------------------------------------------------
-
 st.markdown("---")
 st.markdown("## Feature engineering")
-st.markdown(
-    """
-All 13 per-cell features are computed offline in `scripts/build_sf.py`. Each
-row in the table below is a column in `data/sf_scored.parquet`.
-"""
-)
 
-features = pd.DataFrame(
-    [
-        ("poi_count", "Overture master grid", "Passthrough — POIs with centroid inside cell"),
-        ("unique_categories", "Overture master grid", "Count of distinct primary categories inside the cell"),
-        ("category_entropy", "Overture master grid", "Shannon entropy of category distribution — a proxy for mixed use"),
-        ("intersection_count", "OSM road graph", "Road graph nodes (= intersections) binned by centroid to cell"),
-        ("building_count", "OSM buildings", "Building footprint centroids binned to cell"),
-        ("transit_stop_count", "OSM transit", "public_transport + highway=bus_stop + railway=station|tram_stop|subway_entrance"),
-        ("amenity_count", "OSM amenities", "Total OSM amenities (any tag in our filter set) per cell"),
-        ("restaurant_count", "OSM amenities", "amenity ∈ {restaurant, cafe, fast_food, food_court, ice_cream, bar, pub}"),
-        ("restaurant_count_kring", "derived", "Sum of restaurant_count over the H3 k=2 ring (~550 m radius, 19 cells)"),
-        ("nightlife_count", "OSM amenities", "amenity ∈ {bar, pub, cafe, ice_cream}"),
-        ("safety_count", "OSM amenities", "amenity ∈ {police, hospital, clinic, fire_station}"),
-        ("greenery_count", "OSM amenities", "leisure ∈ {park, garden}"),
-        ("shop_count", "OSM amenities", "Any non-empty shop tag"),
-    ],
-    columns=["feature", "source", "computation"],
-)
+features = pd.DataFrame([
+    ("poi_count", "Overture", "POIs with centroid inside cell"),
+    ("unique_categories", "Overture", "Distinct primary categories in cell"),
+    ("category_entropy", "Overture", "Shannon entropy of category distribution — proxy for mixed use"),
+    ("intersection_count", "OSM roads", "Road graph nodes (intersections) binned to cell"),
+    ("building_count", "OSM buildings", "Building footprint centroids binned to cell"),
+    ("transit_stop_count", "OSM transit", "Bus stops, subway entrances, train stations"),
+    ("amenity_count", "OSM amenities", "Total amenities per cell"),
+    ("restaurant_count", "OSM amenities", "restaurant, cafe, fast_food, food_court, bar, pub, ice_cream"),
+    ("restaurant_count_kring", "derived", "Sum of restaurant_count over H3 k=2 ring (~550 m)"),
+    ("nightlife_count", "OSM amenities", "bar, pub, cafe, ice_cream"),
+    ("safety_count", "OSM amenities", "police, hospital, clinic, fire_station"),
+    ("greenery_count", "OSM amenities", "park, garden"),
+    ("shop_count", "OSM amenities", "Any non-empty shop tag"),
+], columns=["feature", "source", "computation"])
 st.dataframe(features, hide_index=True, use_container_width=True)
 
-st.markdown(
-    """
-**Normalization.** Every feature used by a scoring function is passed through
-robust min-max normalization: the 5th and 95th percentiles define the [0, 1]
-range, and values outside are clipped. This makes the scores resilient to a
-single outlier cell (e.g. a Union Square block with 200 restaurants) and keeps
-the dynamic range tight enough for a visible color ramp.
-"""
-)
-
-st.code(
-    """def _norm(series):
-    lo, hi = series.quantile(0.05), series.quantile(0.95)
-    if hi <= lo:
-        return pd.Series(0.5, index=series.index)
-    return ((series - lo) / (hi - lo)).clip(0.0, 1.0)""",
-    language="python",
-)
+st.markdown("""
+**Normalization.** Features are passed through robust min-max: 5th and 95th
+percentiles define [0, 1], values outside are clipped.
+""")
 
 # ---------------------------------------------------------------------------
-# Scoring formulas
-# ---------------------------------------------------------------------------
-
 st.markdown("---")
 st.markdown("## Scoring formulas")
 
-st.markdown(
-    """
-Each score is a weighted sum of five or six components, each normalized to
-[0, 1]. Weights are held in a Python dict and can be edited directly in
-`curbai/scoring.py` — the downstream parquet and UI will pick up changes on
-the next `python scripts/build_sf.py` run.
-"""
-)
+
+def _weight_df(w: dict) -> pd.DataFrame:
+    return pd.DataFrame([(k, f"{v:.2f}") for k, v in w.items()], columns=["component", "weight"])
 
 
-def _weight_df(weights: dict[str, float]) -> pd.DataFrame:
-    return pd.DataFrame(
-        [(k, f"{v:.2f}") for k, v in weights.items()], columns=["component", "weight"]
-    )
+st.markdown("### 1. Site Intelligence")
+st.markdown("*Where should a business open?*")
+st.dataframe(_weight_df(scoring.SITE_WEIGHTS), hide_index=True, use_container_width=False)
+st.markdown("""
+- **foot_traffic** — `(norm(poi_count) + norm(amenity_count)) / 2`. Two independent proxies for "people are here."
+- **accessibility** — `(norm(transit_stop_count) + norm(intersection_count)) / 2`. How reachable is the block?
+- **commercial_vibrancy** — `(norm(category_entropy) + norm(nightlife_count)) / 2`. Is this an active, diverse commercial zone?
+- **demographic_density** — `norm(building_count)`. Residential + commercial buildings = people who live and work here.
+- **retail_ecosystem** — `(norm(shop_count) + norm(restaurant_count)) / 2`. Existing retail anchors nearby.
+""")
 
+st.markdown("### 2. Brand Location Planner")
+st.markdown("*Pick a category. See the white space.*")
+st.markdown("""
+This tab is **dynamic** — the score recomputes when you change the category dropdown. The formula:
 
-# ---- AV ----
-st.markdown("### 1. AV Rider Launch Readiness")
-st.markdown("*Where should an autonomous ride service launch its next pickup zone?*")
-st.dataframe(_weight_df(scoring.AV_WEIGHTS), hide_index=True, use_container_width=False)
-st.markdown(
-    """
-- **road_simplicity** — `1 − norm(intersection_count)`.
-  AVs prefer simpler grid geometry. High intersection density means complex
-  turns, yield interactions, and multi-way stops.
-- **pickup_curb_proxy** — `1 − 2 × |norm(building_count) − 0.5|`.
-  A U-shaped preference: empty lots have nowhere for riders to wait, while
-  skyscraper canyons have no legal curb space. The sweet spot is mid-density.
-- **demand_density** — `(norm(poi_count) + norm(amenity_count)) / 2`.
-  Two independent proxies for "people are here".
-- **transit_complement** — `1 − 2 × |norm(transit_stop_count) − 0.5|`.
-  Similar U shape: a transit desert has walk-up demand but no mode choice, while
-  a saturated transit corridor competes with the service.
-- **ambient_population** — `norm(category_entropy)`.
-  Mixed-use neighborhoods (residential + retail + office) have riders across
-  the day, not just during commute windows.
-"""
-)
+```
+demand = norm(poi_count) × 0.4 + norm(amenity_count) × 0.3 + norm(transit_stops) × 0.3
+saturation = cat_count_in_kring / max(cat_count_in_kring)
+opportunity = demand × (1 - saturation)
+```
 
-# ---- Delivery ----
-st.markdown("### 2. Autonomous Delivery Handoff")
-st.markdown("*Where can a delivery robot drop a package and have a human find it?*")
-st.dataframe(_weight_df(scoring.DELIVERY_WEIGHTS), hide_index=True, use_container_width=False)
-st.markdown(
-    """
-- **curb_accessible** — `1 − 2 × |norm(building_count) − 0.5|`.
-  Can the robot physically pull up, without being blocked by a warehouse-style
-  loading dock or a skyscraper curb cut.
-- **low_canyon** — `1 − norm(building_count)`.
-  Line-of-sight proxy. Canyons break line-of-sight to the recipient.
-- **pedestrian_density** — `(norm(amenity_count) + norm(intersection_count)) / 2`.
-  Walkable neighborhoods have legible handoff flows.
-- **safety_proxy** — `norm(safety_count)`.
-  Nearby police, hospital, clinic, or fire station = ambient foot traffic and
-  lower perceived risk during the handoff window.
-- **recovery_zones** — `norm(greenery_count)`.
-  Parks and greenery are good retry-wait zones during failed handoffs.
-- **daytime_light** — `norm(poi_count)`.
-  Dense POIs are a proxy for "there is activity here"; dead zones score low.
-"""
-)
+High opportunity = high demand + low same-category supply in the neighborhood. The k-ring sums
+across H3 k=2 neighbors (~550 m radius, 19 cells) so the scoring captures walkable competition,
+not just in-cell.
 
-# ---- Eats ----
-st.markdown("### 3. Rides → Eats Conversion Upside")
-st.markdown("*Which ride drop-off zones have the highest food-delivery cross-sell opportunity?*")
-st.dataframe(_weight_df(scoring.EATS_WEIGHTS), hide_index=True, use_container_width=False)
-st.markdown(
-    """
-- **restaurant_supply** — `norm(restaurant_count_kring)`.
-  Walkable restaurant density in a 19-cell (~550 m) H3 neighborhood — the
-  supply side of the conversion.
-- **drop_gravity** — `norm(poi_count)`.
-  A proxy for ride drop-off volume, which we cannot observe directly.
-- **category_diversity** — `(norm(unique_categories) + norm(category_entropy)) / 2`.
-  Diverse neighborhoods have more "I want X cuisine" triggers.
-- **evening_activity** — `norm(nightlife_count)`.
-  Bars, pubs, cafes — the temporal signature of "just dropped off, still
-  hungry".
-- **underserved_home** — `1 − norm(restaurant_count)`.
-  Cells where the local restaurant supply *at the cell itself* is thin score
-  higher, because residents there have a higher lift from ordering delivery
-  than walking downstairs.
-"""
-)
+**1,238 categories** are available in the dropdown, covering the full Overture Maps taxonomy
+from the 51,572 SF POIs.
+""")
 
-st.code(
-    """# To tune the weights, edit curbai/scoring.py and re-run:
-python scripts/build_sf.py
-# The Streamlit app will pick up the new data/sf_scored.parquet on next load.""",
-    language="bash",
-)
+st.markdown("### 3. Neighborhood Character")
+st.markdown("*What is this block's functional identity?*")
+st.dataframe(_weight_df(scoring.CHARACTER_WEIGHTS), hide_index=True, use_container_width=False)
+st.markdown("""
+- **amenity_walkability** — `(norm(amenity_count) + norm(shop_count)) / 2`. Can you walk to daily needs?
+- **green_access** — `norm(greenery_count)`. Parks and gardens within the cell.
+- **safety_perception** — `norm(safety_count) × 0.6 + norm(nightlife_count) × 0.4`. Physical safety infrastructure + "lit at night" proxy.
+- **evening_vibrancy** — `(norm(nightlife_count) + norm(restaurant_count)) / 2`. Is this block alive after 6pm?
+- **connectivity** — `(norm(transit_stop_count) + norm(intersection_count)) / 2`. Transit + road graph density.
+- **mixed_use** — `norm(category_entropy)`. Residential × commercial × service = a living neighborhood.
+""")
 
 # ---------------------------------------------------------------------------
-# Similarity
-# ---------------------------------------------------------------------------
-
 st.markdown("---")
-st.markdown("## 'Similar cells elsewhere in SF'")
-st.markdown(
-    """
-The similar-cells panel in the main app uses a FAISS `IndexFlatL2` over a
-z-scored matrix of all numeric features (excluding the three scores). For
-every cell the side panel shows, we look up its five nearest neighbors in
-that feature space.
+st.markdown("## What first-party location data would unlock")
+st.markdown("""
+Every score in CurbIndex uses **open-data proxies** for signals that a platform
+with first-party device-level location data could measure directly. The table
+below maps each proxy to its first-party equivalent.
 
-This is a deliberately simple starting point. It answers the question "which
-other SF cells have the same neighborhood character as this one?" — not "which
-other cells have the same population, elevation, and climate?". Swap the
-feature matrix for real learned cell embeddings and the same pipeline works
-without any code changes.
-"""
-)
+The architecture stays identical — you swap the data layer, not the scoring
+logic. That upgrade path is the platform value.
+""")
+
+upgrade = pd.DataFrame([
+    ("Site Intelligence", "foot_traffic", "poi_count + amenity_count", "Actual hourly foot-traffic volume per cell from device signals"),
+    ("Site Intelligence", "accessibility", "transit_stop_count + intersection_count", "Real mode-of-transport distribution — % car vs walk vs transit per cell"),
+    ("Site Intelligence", "commercial_vibrancy", "category_entropy + nightlife_count", "Real-time user density at evening hours, filtered to commercial intent"),
+    ("Site Intelligence", "demographic_density", "building_count", "Age, income-proxy, and interest-graph composition of actual visitors"),
+    ("Brand Planner", "demand_proxy", "poi + amenity + transit composite", "Actual visit volume to the target category per cell per day"),
+    ("Brand Planner", "saturation", "Same-category POI count in k-ring", "Market-share distribution among competitors from visit counts"),
+    ("Brand Planner", "(not yet available)", "—", "Repeat-visit rate: what fraction of visitors come back within 30 days"),
+    ("Neighborhood Character", "safety_perception", "safety_count + nightlife", "Behavioral signal: do people actually walk through this area after dark?"),
+    ("Neighborhood Character", "evening_vibrancy", "nightlife + restaurant count", "Hour-by-hour user density curve — is this block alive at 9pm on a Thursday?"),
+    ("Neighborhood Character", "amenity_walkability", "amenity + shop count", "Which amenities residents actually USE (visit dwell > 5 min) vs just exist on the map"),
+], columns=["tab", "component", "open-data proxy (current)", "first-party upgrade"])
+st.dataframe(upgrade, hide_index=True, use_container_width=True)
+
+st.markdown("""
+**The gap between the two columns IS the platform value.** Open data tells you
+what's *there*. First-party location data tells you what people *do with* what's
+there. The scoring architecture doesn't change — only the input fidelity.
+""")
 
 # ---------------------------------------------------------------------------
-# Limitations
-# ---------------------------------------------------------------------------
-
 st.markdown("---")
-st.markdown("## Limitations and next steps")
-st.markdown(
-    """
-**Known gaps in v1.**
+st.markdown("## Trending and loyalty signals (not yet in v0)")
+st.markdown("""
+Two signal families are commercially valuable but hard to proxy with open data:
 
-- **Demand is a proxy.** `poi_count` and `amenity_count` stand in for actual
-  pickup/drop-off and delivery demand, which would come from a ride-hailing
-  platform's own telemetry. Swapping in real trip-end density would change
-  the ranking meaningfully in purely residential areas.
-- **Feature normalization is city-local.** Scores are defined relative to the
-  distribution of *this* city's features. A "high" score in SF does not directly
-  compare to a "high" score in NYC. For cross-city comparison we would either
-  re-fit percentiles on a pooled city set or use globally-fit learned
-  embeddings.
-- **No temporal layer yet.** The Eats score approximates evening activity via
-  `nightlife_count`, but the right signal is time-of-day ride-drop density
-  crossed with restaurant open hours — that needs hourly data.
-- **Safety is a proxy.** `safety_count` (police/hospital/clinic/fire) is a
-  terrible proxy for street-level safety. For a production product this
-  should be replaced with city-specific open incident data (e.g. SFPD CAD
-  data via DataSF).
-- **Similarity is first-order.** The FAISS index is over raw z-scored
-  features; a learned foundation-model embedding would capture interactions
-  that a linear z-score cannot.
-"""
-)
+**Trending / growth.** Is this neighborhood getting hotter or cooling off?
+- Open proxy: VIIRS nightlight satellite data (annual snapshots, 2014–2021) — cells getting brighter over time = economic growth. Not yet integrated but the data pipeline supports it.
+- First-party version: user-density growth rate per cell. "+15% MAU in this block vs last quarter."
+
+**Loyalty / repeat visitation.** Do people come back?
+- Open proxy: Yelp review velocity (reviews/month at businesses geocoded into H3 cells) — available in the sibling GeoInsights project but not yet wired into CurbIndex.
+- First-party version: actual repeat-visit rate from device fingerprints. "68% of visitors to this block return within 30 days."
+
+Both are plug-in-ready: write a feature extraction function, drop a new parquet into `data/`, and every tab's scoring function picks it up.
+""")
 
 # ---------------------------------------------------------------------------
-# Reproduce
-# ---------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("## Similarity")
+st.markdown("""
+The "similar cells" panel in the main app uses a FAISS `IndexFlatL2` over a
+z-scored matrix of all numeric features. For every selected cell, it returns
+the five nearest neighbors in feature space — cells elsewhere in SF that share
+the same neighborhood character.
+""")
 
+# ---------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("## Limitations")
+st.markdown("""
+- **Demand is a proxy.** POI count and amenity density stand in for actual foot traffic and commercial demand. Swapping in real visitation data would change rankings in purely residential areas.
+- **Normalization is city-local.** A "high" score in SF does not compare directly to a "high" score in NYC. Cross-city comparison requires re-fitting on a pooled city set or using globally-fit embeddings.
+- **No temporal layer yet.** Evening vibrancy approximates time-of-day patterns via nightlife count, but hour-level demand curves require longitudinal data.
+- **Safety is a proxy.** Police/hospital count is a poor proxy for street-level safety. Production use would require open incident data (e.g. SFPD CAD data via DataSF).
+- **Similarity is first-order.** Linear z-score, not a learned embedding. A multimodal foundation model would capture feature interactions.
+""")
+
+# ---------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("## Reproduce from scratch")
-st.code(
-    """# Clone the repo and set up a fresh venv
-python3 -m venv venv
+st.code("""python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# One-time SF data bootstrap (reads a sibling project once, then independent)
-python scripts/bootstrap_data.py
+python scripts/bootstrap_data.py   # one-time data bootstrap
+python scripts/fetch_osm.py        # OpenStreetMap fetch for SF
+python scripts/build_sf.py         # feature engineering + scoring
 
-# Open data fetch for SF (OpenStreetMap via OSMnx)
-python scripts/fetch_osm.py
-
-# Feature engineering + scoring precompute
-python scripts/build_sf.py
-
-# Run the app
-streamlit run app.py""",
-    language="bash",
-)
+streamlit run app.py""", language="bash")

@@ -213,12 +213,25 @@ def main() -> None:
     cells["restaurant_count_kring"] = cells["h3_index"].map(kring_sum(rest_by_h3, k=2))
     log(f"restaurant_count_kring: mean {cells['restaurant_count_kring'].mean():.1f}")
 
+    # --- per-category POI counts (for Brand Location Planner) ----
+    pois_path = DATA_RAW / "pois_sf.parquet"
+    if pois_path.exists():
+        pois = pd.read_parquet(pois_path)
+        pois = pois.dropna(subset=["lat", "lon", "category"])
+        pois["h3_index"] = [latlon_to_h3(lat, lon) for lat, lon in zip(pois["lat"].values, pois["lon"].values)]
+        cat_counts = pois.groupby(["h3_index", "category"]).size().reset_index(name="count")
+        cat_out = DATA_OUT / "category_counts_sf.parquet"
+        cat_counts.to_parquet(cat_out, index=False)
+        n_cats = cat_counts["category"].nunique()
+        log(f"category_counts: {len(cat_counts):,} rows, {n_cats} unique categories -> {cat_out}")
+    else:
+        log("WARN: pois_sf.parquet not found; skipping category_counts")
+
     # --- apply scoring functions ----
     scored = scoring.compute_all(cells)
     log(
-        f"scores — av: mean {scored['score_av'].mean():.3f} max {scored['score_av'].max():.3f} | "
-        f"delivery: mean {scored['score_delivery'].mean():.3f} max {scored['score_delivery'].max():.3f} | "
-        f"eats: mean {scored['score_eats'].mean():.3f} max {scored['score_eats'].max():.3f}"
+        f"scores — site: mean {scored['score_site'].mean():.3f} max {scored['score_site'].max():.3f} | "
+        f"character: mean {scored['score_character'].mean():.3f} max {scored['score_character'].max():.3f}"
     )
 
     # --- write ----
