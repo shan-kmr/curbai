@@ -85,6 +85,11 @@ def load_us_overview() -> pd.DataFrame:
         fars["res5"] = fars.h3_index.map(lambda h: h3.h3_to_parent(h, 5))
         g = fars.groupby("res5")[["fars_crashes", "fars_killed"]].sum().reset_index()
         df = df.merge(g, left_on="h3_index", right_on="res5", how="left").drop(columns=["res5"])
+    if HPMS.exists():
+        hp = pd.read_parquet(HPMS, columns=["h3_index", "hpms_aadt_max"])
+        hp["res5"] = hp.h3_index.map(lambda h: h3.h3_to_parent(h, 5))
+        g = hp.groupby("res5")["hpms_aadt_max"].max().reset_index()
+        df = df.merge(g, left_on="h3_index", right_on="res5", how="left").drop(columns=["res5"])
     return df
 
 
@@ -265,8 +270,10 @@ def hpms_html(row) -> str:
     trucks = _g(row, "hpms_pct_truck")
     truck_row = (f'<div class="jx-row"><span class="k">Trucks</span><span class="v">{_fmt(trucks, "{:.0f}%")}</span></div>'
                  if trucks is not None else "")
+    src = {"hpms2023": "FHWA HPMS 2023", "hpms2022": "FHWA HPMS 2022 · backbone"}.get(
+        str(_g(row, "hpms_source")), "FHWA HPMS")
     return f"""
-      <div class="jx-lab jx-sec">◆ Traffic — FHWA HPMS</div>
+      <div class="jx-lab jx-sec">◆ Traffic — {src}</div>
       <div class="jx-row"><span class="k">AADT (busiest)</span><span class="v"><b>{_fmt(a)}</b> veh/day</span></div>
       <div class="jx-row"><span class="k">Covered segments</span><span class="v">{_fmt(_g(row, 'hpms_seg_count'))}</span></div>
       {truck_row}"""
@@ -339,8 +346,10 @@ if scope == US:
         # ---- national overview (res-5) ----
         df5 = load_us_overview()
         opts = dict(LAYERS)
+        if "hpms_aadt_max" in df5.columns:
+            opts = {"Traffic · AADT": ("hpms_aadt_max", "{:,.0f} veh/day"), **opts}
         if "fars_crashes" in df5.columns:
-            opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **LAYERS}
+            opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **opts}
         layer_name = st.selectbox("Shade the map by", list(opts), index=0, key="atlas_layer_us")
         df5 = apply_layer(df5, *opts[layer_name], elev_max=45000)
 
@@ -391,8 +400,10 @@ if scope == US:
 
         kids = load_us_children(r5_sel)
         opts = dict(LAYERS)
+        if "hpms_aadt_max" in kids.columns:
+            opts = {"Traffic · AADT": ("hpms_aadt_max", "{:,.0f} veh/day"), **opts}
         if "fars_crashes" in kids.columns:
-            opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **LAYERS}
+            opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **opts}
         layer_name = st.selectbox("Shade the map by", list(opts), index=0, key="atlas_layer_us_drill")
         col, valfmt = opts[layer_name]
         kids = apply_layer(kids, col, valfmt)
