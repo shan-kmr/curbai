@@ -37,6 +37,8 @@ a{color:var(--cobalt)!important;}
 .jx-hticks{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;font-size:.55rem;color:var(--faint);margin-top:3px;}
 .jx-fac{font-size:.86rem;padding:3px 0;display:flex;justify-content:space-between;}
 .jx-fac .c{font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:var(--muted);}
+.jx-txt{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:.86rem;color:var(--fg2);line-height:1.46;font-style:italic;margin-top:4px;}
+.jx-sec{margin-top:15px;}
 </style>"""
 
 

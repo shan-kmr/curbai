@@ -62,6 +62,26 @@ def _fmt(v, f: str = "{:,.0f}") -> str:
     return "—" if v is None else f.format(v)
 
 
+def _dist(km) -> str:
+    if km is None:
+        return "—"
+    return f"{km * 1000:.0f} m" if km < 1 else f"{km:.1f} km"
+
+
+def _cat(s) -> str:
+    if not s:
+        return "—"
+    s = str(s).strip("[]'\" ")
+    return " · ".join(p.strip() for p in s.split(">")[-2:]) if ">" in s else s
+
+
+def _amenities(row) -> str:
+    have = [n for n, c in [("hospital", "has_hospital"), ("school", "has_school"),
+                           ("park", "has_park"), ("pharmacy", "has_pharmacy"),
+                           ("worship", "has_worship")] if _g(row, c)]
+    return ", ".join(have) if have else "—"
+
+
 def render_card(row: pd.Series) -> None:
     hh = json.loads(row.hour_hist)
     facs = json.loads(row.top_factors)
@@ -72,33 +92,62 @@ def render_card(row: pd.Series) -> None:
         for k, v in facs
     ) or '<div class="jx-fac"><span class="c">— none coded —</span></div>'
 
-    pop, dens = _g(row, "population"), _g(row, "pop_density")
+    pop = _g(row, "kontur_population") or _g(row, "population")
+    nl = _g(row, "nightlight_2021")
     bc, fl, mh = _g(row, "building_count"), _g(row, "avg_floors"), _g(row, "max_height")
-    ar, nl = _g(row, "total_building_area"), _g(row, "nightlight_2021")
+    poi, cat, ntr = _g(row, "poi_count"), _cat(_g(row, "top_category")), _g(row, "count_transit")
+    dh, dp, dt = _g(row, "dist_hospital_km"), _g(row, "dist_park_km"), _g(row, "dist_transit_km")
+    rc, rpri, rres = _g(row, "road_count"), _g(row, "road_primary"), _g(row, "road_residential")
+    vis, pkh, nf, rog = (_g(row, "wt_visit_count"), _g(row, "wt_peak_hour"),
+                         _g(row, "wt_night_fraction"), _g(row, "wt_radius_of_gyration_km"))
+    sw = _g(row, "nycsw_sidewalk_length_m")
+    temp, precip = _g(row, "annual_mean_temp"), _g(row, "annual_precipitation")
+    txt = _g(row, "llmgeovec_text")
+    peak_v = fmt_hour(int(pkh)) if pkh is not None else "—"
 
     st.markdown(f"""
     <div class="jx-card">
       <div class="jx-cid">R9 · {row.h3_index[-12:]} · New York · 0.105 km²</div>
       <div class="jx-lab" style="margin-top:6px">◆ Safety — NYPD Vision Zero</div>
-      <div class="jx-big">{row.crashes:,}<small> collisions on record</small></div>
-      <div class="jx-row"><span class="k">People killed</span><span class="v"><b>{row.killed}</b></span></div>
-      <div class="jx-row"><span class="k">People injured</span><span class="v">{row.injured:,}</span></div>
+      <div class="jx-big">{row.crashes:,}<small> collisions</small></div>
+      <div class="jx-row"><span class="k">Killed / injured</span><span class="v"><b>{row.killed}</b> · {row.injured:,}</span></div>
       <div class="jx-row"><span class="k">Pedestrian</span><span class="v">{row.ped_inj} inj · {row.ped_kill} killed</span></div>
-      <div class="jx-row"><span class="k">Cyclist</span><span class="v">{row.cyc_inj} inj · {row.cyc_kill} killed</span></div>
-      <div class="jx-row"><span class="k">Motorist</span><span class="v">{row.mot_inj:,} inj · {row.mot_kill} killed</span></div>
       <div class="jx-row"><span class="k">Peak</span><span class="v"><b>{DOW[row.peak_dow] if row.peak_dow>=0 else '—'} {fmt_hour(row.peak_hour)}</b></span></div>
-      <div class="jx-lab">By hour of day</div>
       <div class="jx-hist">{bars}</div>
       <div class="jx-hticks"><span>12a</span><span>6a</span><span>12p</span><span>6p</span><span>11p</span></div>
-      <div class="jx-lab">Top contributing factors</div>
-      {fac_html}
-      <div class="jx-lab" style="margin-top:16px">◆ Who's here — WorldPop / GHSL</div>
-      <div class="jx-row"><span class="k">Population</span><span class="v"><b>{_fmt(pop)}</b> residents</span></div>
-      <div class="jx-lab">◆ Built form — Overture buildings</div>
+      <div class="jx-lab jx-sec" style="margin-top:6px">Top contributing factors</div>{fac_html}
+
+      <div class="jx-lab jx-sec">◆ Who's here — Kontur</div>
+      <div class="jx-row"><span class="k">Population</span><span class="v"><b>{_fmt(pop)}</b> est. residents</span></div>
+      <div class="jx-row"><span class="k">Night-lights</span><span class="v">{_fmt(nl, '{:.0f}')}</span></div>
+
+      <div class="jx-lab jx-sec">◆ Built form — Overture</div>
       <div class="jx-row"><span class="k">Buildings</span><span class="v"><b>{_fmt(bc)}</b> · avg {_fmt(fl, '{:.0f}')} fl</span></div>
       <div class="jx-row"><span class="k">Tallest</span><span class="v">{_fmt(mh, '{:.0f}')} m</span></div>
-      <div class="jx-row"><span class="k">Footprint</span><span class="v">{_fmt(ar/1000 if ar else None)}k m²</span></div>
-      <div class="jx-row"><span class="k">Night-lights (2021)</span><span class="v">{_fmt(nl, '{:.0f}')}</span></div>
+
+      <div class="jx-lab jx-sec">◆ Places — Overture / FSQ</div>
+      <div class="jx-row"><span class="k">POIs</span><span class="v"><b>{_fmt(poi)}</b> · {_fmt(ntr, '{:.0f}')} transit</span></div>
+      <div class="jx-row"><span class="k">Character</span><span class="v">{cat}</span></div>
+      <div class="jx-row"><span class="k">On / near</span><span class="v">{_amenities(row)}</span></div>
+
+      <div class="jx-lab jx-sec">◆ Access — nearest</div>
+      <div class="jx-row"><span class="k">Hospital · Park · Transit</span><span class="v">{_dist(dh)} · {_dist(dp)} · {_dist(dt)}</span></div>
+
+      <div class="jx-lab jx-sec">◆ Roads — OpenStreetMap</div>
+      <div class="jx-row"><span class="k">Segments</span><span class="v"><b>{_fmt(rc)}</b> · {_fmt(rpri)} primary · {_fmt(rres)} resid.</span></div>
+
+      <div class="jx-lab jx-sec">◆ Movement — trajectory data</div>
+      <div class="jx-row"><span class="k">Visits</span><span class="v"><b>{_fmt(vis)}</b> · peak {peak_v}</span></div>
+      <div class="jx-row"><span class="k">Night · radius</span><span class="v">{_fmt(nf*100 if nf is not None else None, '{:.0f}')}% · {_fmt(rog, '{:.1f}')} km</span></div>
+
+      <div class="jx-lab jx-sec">◆ Streetscape — NYC DOT</div>
+      <div class="jx-row"><span class="k">Sidewalk</span><span class="v">{_fmt(sw)} m</span></div>
+
+      <div class="jx-lab jx-sec">◆ Climate — WorldClim</div>
+      <div class="jx-row"><span class="k">Temp · rain</span><span class="v">{_fmt(temp, '{:.0f}')}°C · {_fmt(precip)} mm/yr</span></div>
+
+      <div class="jx-lab jx-sec">◆ The model reads</div>
+      <div class="jx-txt">{(str(txt)[:200] + '…') if txt else '—'}</div>
     </div>
     """, unsafe_allow_html=True)
 
