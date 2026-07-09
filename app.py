@@ -94,22 +94,25 @@ def compute_catchment(h3_id: str, max_minutes: int = 15) -> dict[str, float]:
 
 
 def score_to_color(score: float) -> list[int]:
+    # Paper -> cobalt ramp (Janus house style): faint on quiet cells, full
+    # cobalt (#1E3A8A) at the top. Alpha rises with score so the surface reads.
     if score is None or (isinstance(score, float) and math.isnan(score)):
-        return [60, 50, 42, 120]
+        return [200, 196, 186, 55]
     t = max(0.0, min(1.0, float(score)))
     stops = [
-        (0.00, (90, 60, 40)),
-        (0.25, (140, 95, 55)),
-        (0.50, (200, 150, 90)),
-        (0.75, (230, 195, 130)),
-        (1.00, (255, 225, 160)),
+        (0.00, (223, 221, 212)),
+        (0.25, (170, 182, 205)),
+        (0.50, (108, 141, 196)),
+        (0.75, (54, 92, 163)),
+        (1.00, (30, 58, 138)),
     ]
+    alpha = int(70 + t * 165)
     for (t0, c0), (t1, c1) in zip(stops[:-1], stops[1:]):
         if t0 <= t <= t1:
             f = (t - t0) / (t1 - t0 + 1e-9)
             rgb = [int(c0[i] + f * (c1[i] - c0[i])) for i in range(3)]
-            return rgb + [215]
-    return [255, 225, 160, 215]
+            return rgb + [alpha]
+    return [30, 58, 138, 235]
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +244,7 @@ def build_deck(
                 id="focus",
                 data=focus_df,
                 get_hexagon="h3_index",
-                get_fill_color=[240, 220, 180, 170],
+                get_fill_color=[201, 151, 43, 70],
                 get_elevation="_elev",
                 elevation_scale=1.5,
                 extruded=True,
@@ -262,16 +265,17 @@ def build_deck(
     return pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=clat, longitude=clon, zoom=zoom, pitch=42),
-        map_style="dark",
+        map_style="light",
         tooltip={
             "html": f"<b>{title}</b><br/>click to select<br/>"
                     "Score: {_score_pct}<br/>H3: {h3_index}",
             "style": {
-                "backgroundColor": "#2a221d",
-                "color": "#e6d5b8",
+                "backgroundColor": "#F6F4EF",
+                "color": "#1A1815",
                 "fontSize": "12px",
                 "padding": "10px",
                 "borderRadius": "4px",
+                "border": "1px solid #E0DDD4",
             },
         },
     )
