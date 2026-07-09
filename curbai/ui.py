@@ -39,6 +39,21 @@ a{color:var(--cobalt)!important;}
 .jx-fac .c{font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:var(--muted);}
 .jx-txt{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:.86rem;color:var(--fg2);line-height:1.46;font-style:italic;margin-top:4px;}
 .jx-sec{margin-top:15px;}
+/* card entrance — card rises in, sections stagger, bars grow from baseline */
+@keyframes jxIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+@keyframes jxPop{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:scale(1)}}
+@keyframes jxBar{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+.jx-card{animation:jxIn .32s ease-out both;}
+.jx-big{transform-origin:left bottom;animation:jxPop .38s cubic-bezier(.2,.9,.3,1.15) both .08s;}
+.jx-card .jx-lab{animation:jxIn .3s ease-out both;}
+.jx-card .jx-lab:nth-of-type(1){animation-delay:.04s}.jx-card .jx-lab:nth-of-type(2){animation-delay:.08s}
+.jx-card .jx-lab:nth-of-type(3){animation-delay:.12s}.jx-card .jx-lab:nth-of-type(4){animation-delay:.16s}
+.jx-card .jx-lab:nth-of-type(5){animation-delay:.20s}.jx-card .jx-lab:nth-of-type(6){animation-delay:.24s}
+.jx-card .jx-lab:nth-of-type(7){animation-delay:.28s}.jx-card .jx-lab:nth-of-type(8){animation-delay:.32s}
+.jx-card .jx-lab:nth-of-type(9){animation-delay:.36s}.jx-card .jx-lab:nth-of-type(10){animation-delay:.40s}
+.jx-card .jx-lab:nth-of-type(n+11){animation-delay:.44s}
+.jx-hist .b{transform-origin:bottom;animation:jxBar .5s ease-out both .18s;}
+@media (prefers-reduced-motion: reduce){.jx-card,.jx-card *{animation:none!important}}
 </style>"""
 
 

@@ -65,6 +65,10 @@ ACS = DATADIR / "acs_us_h3.parquet"
 HPMS = DATADIR / "hpms_us_h3.parquet"
 NRI = DATADIR / "nri_us_h3.parquet"
 LODES = DATADIR / "lodes_us_h3.parquet"
+LODESOD = DATADIR / "lodesod_us_h3.parquet"
+GDELT = DATADIR / "gdelt_us_h3.parquet"
+EAGLEI = DATADIR / "eaglei_us_h3.parquet"
+NDVI = DATADIR / "ndvi_us_h3.parquet"
 DERIVED = DATADIR / "us_derived_h3.parquet"
 WM = DATADIR / "worldmove_us_h3.parquet"
 
@@ -105,7 +109,7 @@ def load_us_children(r5: str) -> pd.DataFrame:
         f"SELECT * FROM read_parquet('{US_R9_GLOB}') WHERE res5 = ?", [r5]
     ).df()
     con.register("kids", kids[["h3_index"]])
-    for side in (FARS, ACS, HPMS, NRI, LODES, DERIVED, WM):
+    for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI, DERIVED, WM):
         if not side.exists():
             continue
         s = con.execute(
@@ -228,8 +232,9 @@ def base_html(row, top: str = "", census: str = "", traffic: str = "",
       <div class="jx-row"><span class="k">Night · radius</span><span class="v">{_fmt(nf*100 if nf is not None else None, '{:.0f}')}% · {_fmt(rog, '{:.1f}')} km</span></div>
       {flows}
       {street}
-      <div class="jx-lab jx-sec">◆ Climate — WorldClim</div>
+      <div class="jx-lab jx-sec">◆ Climate — WorldClim{' / MODIS' if _g(row, 'ndvi_summer') is not None else ''}</div>
       <div class="jx-row"><span class="k">Temp · rain</span><span class="v">{_fmt(temp, '{:.0f}')}°C · {_fmt(precip)} mm/yr</span></div>
+      {f'<div class="jx-row"><span class="k">Greenness (summer NDVI)</span><span class="v"><b>{_g(row, "ndvi_summer"):.2f}</b></span></div>' if _g(row, 'ndvi_summer') is not None else ''}
       <div class="jx-lab jx-sec">◆ The model reads</div>
       <div class="jx-txt">{(str(txt)[:210] + '…') if txt else '—'}</div>
     </div>
@@ -366,6 +371,52 @@ def lodes_html(row) -> str:
       {mix_row}"""
 
 
+def lodesod_html(row) -> str:
+    """Who works here — worker-origin profile from census home↔work pairs."""
+    w = _g(row, "lodesod_workers")
+    if w is None:
+        return ""
+    inc = _g(row, "lodesod_home_income")
+    far = _g(row, "lodesod_pct_far")
+    nov = _g(row, "lodesod_home_novehicle_pct")
+    cty = _g(row, "lodesod_top_origin_county")
+    shr = _g(row, "lodesod_top_origin_share")
+    origin = (f'<div class="jx-row"><span class="k">Top origin county</span>'
+              f'<span class="v">{cty} · {_fmt(shr, "{:.0f}%")}</span></div>' if cty else "")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Who works here — LODES O-D</div>
+      <div class="jx-row"><span class="k">Workers</span><span class="v"><b>{_fmt(w)}</b></span></div>
+      <div class="jx-row"><span class="k">Live in tracts of</span><span class="v"><b>{_fmt(inc, '${:,.0f}')}</b> median income</span></div>
+      <div class="jx-row"><span class="k">Commute &gt;25 km</span><span class="v">{_fmt(far, '{:.0f}%')} · {_fmt(nov, '{:.0f}%')} carless homes</span></div>
+      {origin}"""
+
+
+def gdelt_html(row) -> str:
+    """Geocoded news attention — counts by category, one tone number."""
+    n = _g(row, "gdelt_events")
+    if n is None:
+        return ""
+    tone = _g(row, "gdelt_tone_mean")
+    return f"""
+      <div class="jx-lab jx-sec">◆ News attention — GDELT · place-level</div>
+      <div class="jx-row"><span class="k">Geocoded events (180 d)</span><span class="v"><b>{_fmt(n)}</b> · {_fmt(_g(row, 'gdelt_days'), '{:.0f}')} days</span></div>
+      <div class="jx-row"><span class="k">Protest · conflict</span><span class="v">{_fmt(_g(row, 'gdelt_protest'))} · {_fmt(_g(row, 'gdelt_conflict'))}</span></div>
+      <div class="jx-row"><span class="k">Mean tone</span><span class="v">{_fmt(tone, '{:+.1f}')}</span></div>"""
+
+
+def eaglei_html(row) -> str:
+    """Power reliability — EAGLE-I county outage history. Headline is the
+    SAIDI-like hours-dark-per-customer; raw any-customer-out hours saturate
+    for big counties and are not shown."""
+    h = _g(row, "eaglei_hrs_dark_per_cust_yr")
+    if h is None:
+        return ""
+    return f"""
+      <div class="jx-lab jx-sec">◆ Power reliability — EAGLE-I · county</div>
+      <div class="jx-row"><span class="k">Hours dark / customer</span><span class="v"><b>{h:,.1f}</b> /yr</span></div>
+      <div class="jx-row"><span class="k">Worst event</span><span class="v">{_fmt(_g(row, 'eaglei_max_out'))} customers out</span></div>"""
+
+
 def flows_html(row) -> str:
     if _g(row, "wm_inflow") is None and _g(row, "wm_outflow") is None:
         return ""
@@ -386,13 +437,14 @@ def render_card(row) -> None:
 
 
 def render_us_card(row) -> None:
-    """US drill card — FARS + rates on top; census, NRI, jobs, traffic, flows
-    sections light up as their parquets exist."""
+    """US drill card — FARS + rates on top; census, NRI, jobs, worker-origins,
+    traffic, flows, news, power sections light up as their parquets exist."""
     st.markdown(base_html(row,
                           top=fars_html(row) + rates_html(row),
-                          census=acs_html(row) + nri_html(row) + lodes_html(row),
+                          census=acs_html(row) + nri_html(row) + lodes_html(row) + lodesod_html(row),
                           traffic=hpms_html(row),
-                          flows=flows_html(row)), unsafe_allow_html=True)
+                          flows=flows_html(row) + gdelt_html(row) + eaglei_html(row)),
+                unsafe_allow_html=True)
 
 
 def parse_selection(event, current):
@@ -410,14 +462,28 @@ def parse_selection(event, current):
     return None
 
 
-def hex_map(df, lat, lon, zoom, pitch, key, tooltip_html):
+def hex_map(df, lat, lon, zoom, pitch, key, tooltip_html, focus=None, bearing=0.0):
+    layers = [pdk.Layer(
+        "H3HexagonLayer", id="atlas", data=df, get_hexagon="h3_index",
+        get_fill_color="_color", get_elevation="_elev", elevation_scale=1,
+        extruded=True, pickable=True, auto_highlight=True, coverage=0.9,
+        # tween color/height when the shade layer changes (same mounted deck)
+        transitions={"getFillColor": 450, "getElevation": 450},
+    )]
+    if focus is not None and len(focus):
+        # persistent selection accent — stroked, raised, full cobalt
+        fdf = focus.copy()
+        fdf["_elev_f"] = fdf["_elev"] * 1.05 + 6.0
+        layers.append(pdk.Layer(
+            "H3HexagonLayer", id="atlas-focus", data=fdf, get_hexagon="h3_index",
+            get_fill_color=[30, 58, 138, 235], get_elevation="_elev_f",
+            elevation_scale=1, extruded=True, pickable=False, coverage=0.98,
+            stroked=True, get_line_color=[246, 244, 239, 255], line_width_min_pixels=2,
+        ))
     deck = pdk.Deck(
-        layers=[pdk.Layer(
-            "H3HexagonLayer", id="atlas", data=df, get_hexagon="h3_index",
-            get_fill_color="_color", get_elevation="_elev", elevation_scale=1,
-            extruded=True, pickable=True, auto_highlight=True, coverage=0.9,
-        )],
-        initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom, pitch=pitch),
+        layers=layers,
+        initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom,
+                                         pitch=pitch, bearing=bearing),
         map_style="light",
         tooltip={"html": tooltip_html,
                  "style": {"backgroundColor": "#F6F4EF", "color": "#1A1815", "fontSize": "12px",
@@ -453,6 +519,9 @@ if scope == US:
         for label, col_fmt in {
             "Jobs · LODES": ("lodes_jobs", "{:,.0f} workplace jobs"),
             "Hazard $ · FEMA NRI": ("nri_eal_alloc", "${:,.0f}/yr expected loss"),
+            "News events · GDELT": ("gdelt_events", "{:,.0f} events / 180 d"),
+            "Greenness · NDVI": ("ndvi_summer", "{:.2f} NDVI"),
+            "Hrs dark/cust · EAGLE-I": ("eaglei_hrs_dark_per_cust_yr", "{:,.1f} h dark/cust/yr"),
         }.items():
             if col_fmt[0] in df5.columns:
                 opts[label] = col_fmt
@@ -513,6 +582,9 @@ if scope == US:
         for label, col_fmt in {
             "Jobs · LODES": ("lodes_jobs", "{:,.0f} workplace jobs"),
             "Hazard $ · FEMA NRI": ("nri_eal_alloc", "${:,.0f}/yr expected loss"),
+            "News events · GDELT": ("gdelt_events", "{:,.0f} events / 180 d"),
+            "Greenness · NDVI": ("ndvi_summer", "{:.2f} NDVI"),
+            "Hrs dark/cust · EAGLE-I": ("eaglei_hrs_dark_per_cust_yr", "{:,.1f} h dark/cust/yr"),
             "Rate · visits/resident": ("drv_visits_per_resident", "{:,.1f}× visits/resident"),
             "Rate · fatal/100k AADT": ("drv_fatal_per_100k_aadt", "{:.2f}/yr per 100k veh·day"),
         }.items():
@@ -535,17 +607,18 @@ if scope == US:
         st.caption(f"United States · cell {r5_sel[-9:]} · {len(kids):,} res-9 hexes{extra} · "
                    f"shaded by {layer_name.lower()} · click any hex for the full card")
 
+        focus = st.session_state.get("us_focus", default_focus)
+        frow = kids[kids.h3_index == focus]
         left, right = st.columns([2, 1], gap="large")
         with left:
-            event = hex_map(kids, clat, clon, 9.4, 45, "us_drill_deck",
-                            "<b>{_val_str}</b><br/>click for the full card")
+            event = hex_map(kids, clat, clon, 9.4, 50, "us_drill_deck",
+                            "<b>{_val_str}</b><br/>click for the full card",
+                            focus=frow, bearing=18.0)
             new = parse_selection(event, st.session_state.get("us_focus"))
             if new:
                 st.session_state["us_focus"] = new
                 st.rerun()
         with right:
-            focus = st.session_state.get("us_focus", default_focus)
-            frow = kids[kids.h3_index == focus]
             if len(frow) or len(kids):
                 render_us_card(frow.iloc[0] if len(frow) else kids.iloc[0])
             st.caption("Raw open data, keyed to one H3 cell. No scores.")
@@ -569,16 +642,16 @@ else:
     extra = f" · {int(df.crashes.sum()):,} collisions" if "crashes" in df.columns else ""
     st.caption(f"{scope} · {len(df):,} hexes · shaded by {layer_name.lower()}{extra} · click any cell for the full card")
 
+    focus = st.session_state.get("atlas_focus", default_focus)
+    frow = df[df.h3_index == focus]
     left, right = st.columns([2, 1], gap="large")
     with left:
         event = hex_map(df, clat, clon, czoom, 45, "atlas_deck",
-                        "<b>{_val_str}</b><br/>click for the full card")
+                        "<b>{_val_str}</b><br/>click for the full card", focus=frow)
         new = parse_selection(event, st.session_state.get("atlas_focus"))
         if new:
             st.session_state["atlas_focus"] = new
             st.rerun()
     with right:
-        focus = st.session_state.get("atlas_focus", default_focus)
-        frow = df[df.h3_index == focus]
         render_card(frow.iloc[0] if len(frow) else df.iloc[0])
         st.caption("Raw open data, keyed to one H3 cell. No scores.")

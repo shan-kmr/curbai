@@ -42,6 +42,9 @@ FARS = DATA / "fars_us_h3.parquet"
 HPMS = DATA / "hpms_us_h3.parquet"
 LODES = DATA / "lodes_us_h3.parquet"
 NRI = DATA / "nri_us_h3.parquet"
+GDELT = DATA / "gdelt_us_h3.parquet"
+EAGLEI = DATA / "eaglei_us_h3.parquet"
+NDVI = DATA / "ndvi_us_h3.parquet"
 OUT = DATA / "us_derived_h3.parquet"
 WM_OUT = DATA / "worldmove_us_h3.parquet"
 
@@ -141,6 +144,21 @@ def main() -> None:
         rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
     if LODES.exists():
         r = parent_roll(LODES, {"lodes_jobs": ("lodes_jobs", "sum")})
+        rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
+    if GDELT.exists():
+        r = parent_roll(GDELT, {"gdelt_events": ("gdelt_events", "sum")})
+        rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
+    if NDVI.exists():
+        r = con.execute(f"""
+            SELECT b.res5 AS h3_index, avg(t.ndvi_summer) AS ndvi_summer
+            FROM read_parquet('{NDVI.as_posix()}') t
+            JOIN read_parquet('{R9_GLOB}') b USING (h3_index) GROUP BY b.res5""").df()
+        rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
+    if EAGLEI.exists():
+        r = con.execute(f"""
+            SELECT b.res5 AS h3_index, max(t.eaglei_hrs_dark_per_cust_yr) AS eaglei_hrs_dark_per_cust_yr
+            FROM read_parquet('{EAGLEI.as_posix()}') t
+            JOIN read_parquet('{R9_GLOB}') b USING (h3_index) GROUP BY b.res5""").df()
         rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
     if "nri_eal_alloc" in out.columns:
         e = con.execute(f"""
