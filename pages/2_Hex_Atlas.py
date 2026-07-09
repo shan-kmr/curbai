@@ -63,6 +63,10 @@ US_R9_GLOB = str(DATADIR / "us_r9" / "*.parquet")
 FARS = DATADIR / "fars_us_h3.parquet"
 ACS = DATADIR / "acs_us_h3.parquet"
 HPMS = DATADIR / "hpms_us_h3.parquet"
+NRI = DATADIR / "nri_us_h3.parquet"
+LODES = DATADIR / "lodes_us_h3.parquet"
+DERIVED = DATADIR / "us_derived_h3.parquet"
+WM = DATADIR / "worldmove_us_h3.parquet"
 
 
 # ---------- loaders ----------
@@ -77,18 +81,19 @@ def load(slug: str) -> pd.DataFrame:
     return df
 
 
+ROLLUPS = DATADIR / "us_r5_rollups.parquet"
+
+
 @st.cache_data(show_spinner="Loading the United States…")
 def load_us_overview() -> pd.DataFrame:
     df = pd.read_parquet(US_R5)
-    if FARS.exists():
+    if ROLLUPS.exists():
+        # precomputed by scripts/build_derived.py — no parent math at load
+        df = df.merge(pd.read_parquet(ROLLUPS), on="h3_index", how="left")
+    elif FARS.exists():
         fars = pd.read_parquet(FARS, columns=["h3_index", "fars_crashes", "fars_killed"])
         fars["res5"] = fars.h3_index.map(lambda h: h3.h3_to_parent(h, 5))
         g = fars.groupby("res5")[["fars_crashes", "fars_killed"]].sum().reset_index()
-        df = df.merge(g, left_on="h3_index", right_on="res5", how="left").drop(columns=["res5"])
-    if HPMS.exists():
-        hp = pd.read_parquet(HPMS, columns=["h3_index", "hpms_aadt_max"])
-        hp["res5"] = hp.h3_index.map(lambda h: h3.h3_to_parent(h, 5))
-        g = hp.groupby("res5")["hpms_aadt_max"].max().reset_index()
         df = df.merge(g, left_on="h3_index", right_on="res5", how="left").drop(columns=["res5"])
     return df
 
@@ -100,14 +105,15 @@ def load_us_children(r5: str) -> pd.DataFrame:
         f"SELECT * FROM read_parquet('{US_R9_GLOB}') WHERE res5 = ?", [r5]
     ).df()
     con.register("kids", kids[["h3_index"]])
-    for side in (FARS, ACS, HPMS):
+    for side in (FARS, ACS, HPMS, NRI, LODES, DERIVED, WM):
         if not side.exists():
             continue
         s = con.execute(
             f"SELECT t.* FROM read_parquet('{side.as_posix()}') t "
             "JOIN kids USING (h3_index)"
         ).df()
-        s = s.drop(columns=[c for c in ("center_lat", "center_lon") if c in s])
+        # first layer to bring a column wins (centers, tract_geoid, ...)
+        s = s.drop(columns=[c for c in s.columns if c != "h3_index" and c in kids.columns])
         kids = kids.merge(s, on="h3_index", how="left")
     return kids
 
@@ -168,10 +174,11 @@ def _hist(values) -> str:
 
 # ---------- card sections ----------
 
-def base_html(row, top: str = "", census: str = "", traffic: str = "", street: str = "") -> str:
+def base_html(row, top: str = "", census: str = "", traffic: str = "",
+              flows: str = "", street: str = "") -> str:
     """The shared raw-data card. Optional fragments slot in at fixed points:
-    top (safety), census (after Who's here), traffic (after Roads), street
-    (before Climate)."""
+    top (safety/rates), census (after Who's here), traffic (after Roads),
+    flows + street (after Movement)."""
     pop = _g(row, "kontur_population") or _g(row, "population")
     nl = _g(row, "nightlight_2021")
     bc, fl, mh = _g(row, "building_count"), _g(row, "avg_floors"), _g(row, "max_height")
@@ -183,12 +190,25 @@ def base_html(row, top: str = "", census: str = "", traffic: str = "", street: s
     temp, precip = _g(row, "annual_mean_temp"), _g(row, "annual_precipitation")
     txt = _g(row, "llmgeovec_text")
 
+    # calibrated population (census tract truth x kontur weights) when derived
+    cal = _g(row, "pop_calibrated")
+    if cal is not None:
+        pop_rows = (f'<div class="jx-row"><span class="k">Residents</span>'
+                    f'<span class="v"><b>{_fmt(cal)}</b> census-calibrated</span></div>'
+                    f'<div class="jx-row"><span class="k">Modeled index</span>'
+                    f'<span class="v">{_fmt(pop)}</span></div>')
+        who_src = "ACS × Kontur"
+    else:
+        pop_rows = (f'<div class="jx-row"><span class="k">Population</span>'
+                    f'<span class="v"><b>{_fmt(pop)}</b> modeled residents</span></div>')
+        who_src = "Kontur"
+
     return f"""
     <div class="jx-card">
       <div class="jx-cid">R9 · {row.h3_index[-12:]} · 0.105 km²</div>
       {top}
-      <div class="jx-lab jx-sec">◆ Who's here — Kontur</div>
-      <div class="jx-row"><span class="k">Population</span><span class="v"><b>{_fmt(pop)}</b> modeled residents</span></div>
+      <div class="jx-lab jx-sec">◆ Who's here — {who_src}</div>
+      {pop_rows}
       <div class="jx-row"><span class="k">Night-lights</span><span class="v">{_fmt(nl, '{:.0f}')}</span></div>
       {census}
       <div class="jx-lab jx-sec">◆ Built form — Overture</div>
@@ -206,6 +226,7 @@ def base_html(row, top: str = "", census: str = "", traffic: str = "", street: s
       <div class="jx-lab jx-sec">◆ Movement — trajectory data</div>
       <div class="jx-row"><span class="k">Visits</span><span class="v"><b>{_fmt(vis)}</b> · peak {fmt_hour(pkh) if pkh is not None else '—'}</span></div>
       <div class="jx-row"><span class="k">Night · radius</span><span class="v">{_fmt(nf*100 if nf is not None else None, '{:.0f}')}% · {_fmt(rog, '{:.1f}')} km</span></div>
+      {flows}
       {street}
       <div class="jx-lab jx-sec">◆ Climate — WorldClim</div>
       <div class="jx-row"><span class="k">Temp · rain</span><span class="v">{_fmt(temp, '{:.0f}')}°C · {_fmt(precip)} mm/yr</span></div>
@@ -279,6 +300,81 @@ def hpms_html(row) -> str:
       {truck_row}"""
 
 
+def rates_html(row) -> str:
+    """Cross-layer rates — real units, named denominators. No scores."""
+    rows = []
+    r = _g(row, "drv_fatal_per_100k_aadt")
+    if r is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Fatal / traffic</span>'
+                    f'<span class="v"><b>{r:.2f}</b> /yr per 100k veh·day</span></div>')
+    v = _g(row, "drv_visits_per_resident")
+    if v is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Visits / resident</span>'
+                    f'<span class="v"><b>{v:,.1f}×</b></span></div>')
+    j = _g(row, "drv_jobs_per_resident")
+    if j is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Jobs / resident</span>'
+                    f'<span class="v"><b>{j:,.1f}×</b> daytime pull</span></div>')
+    e = _g(row, "drv_eal_per_capita")
+    if e is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Hazard loss / person</span>'
+                    f'<span class="v"><b>${e:,.0f}</b> /yr expected</span></div>')
+    if not rows:
+        return ""
+    return f'<div class="jx-lab jx-sec">◆ Rates — cross-layer</div>{"".join(rows)}'
+
+
+def nri_html(row) -> str:
+    """FEMA National Risk Index — tract-level hazard economics."""
+    eal = _g(row, "nri_eal_total")
+    if eal is None:
+        return ""
+    top = ""
+    th = _g(row, "nri_top_hazards")
+    if th:
+        try:
+            parts = " · ".join(f"{name} ${v/1e6:.1f}M" if v >= 1e6 else f"{name} ${v/1e3:.0f}k"
+                               for name, v in json.loads(th)[:3])
+            top = f'<div class="jx-row"><span class="k">Top hazards</span><span class="v">{parts}</span></div>'
+        except Exception:
+            pass
+    alloc = _g(row, "nri_eal_alloc")
+    alloc_row = (f'<div class="jx-row"><span class="k">This hex share</span>'
+                 f'<span class="v"><b>${alloc:,.0f}</b> /yr (pop-allocated)</span></div>'
+                 if alloc is not None else "")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Hazard risk — FEMA NRI · tract</div>
+      <div class="jx-row"><span class="k">Expected annual loss</span><span class="v"><b>${eal:,.0f}</b> /yr tract</span></div>
+      {alloc_row}
+      {top}
+      <div class="jx-row"><span class="k">Rating</span><span class="v">{_g(row, 'nri_risk_rating') or '—'}</span></div>"""
+
+
+def lodes_html(row) -> str:
+    j = _g(row, "lodes_jobs")
+    if j is None:
+        return ""
+    mix = " · ".join(f"{n} {int(v):,}" for n, v in
+                     [("retail", _g(row, "lodes_jobs_retail")), ("food", _g(row, "lodes_jobs_food")),
+                      ("health", _g(row, "lodes_jobs_health")), ("edu", _g(row, "lodes_jobs_edu"))]
+                     if v)
+    mix_row = (f'<div class="jx-row"><span class="k">Mix</span><span class="v">{mix}</span></div>'
+               if mix else "")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Jobs — Census LODES · BG-centroid</div>
+      <div class="jx-row"><span class="k">Workplace jobs</span><span class="v"><b>{int(j):,}</b> (block-group lump)</span></div>
+      {mix_row}"""
+
+
+def flows_html(row) -> str:
+    if _g(row, "wm_inflow") is None and _g(row, "wm_outflow") is None:
+        return ""
+    return f"""
+      <div class="jx-lab jx-sec">◆ Flows — O-D panel</div>
+      <div class="jx-row"><span class="k">In / out</span><span class="v"><b>{_fmt(_g(row, 'wm_inflow'))}</b> · {_fmt(_g(row, 'wm_outflow'))} trips</span></div>
+      <div class="jx-row"><span class="k">Destination diversity</span><span class="v">{_fmt(_g(row, 'wm_dest_diversity'), '{:.0f}')} unique</span></div>"""
+
+
 def render_card(row) -> None:
     """City card — NYC gets Vision Zero + streetscape."""
     street = ""
@@ -290,9 +386,13 @@ def render_card(row) -> None:
 
 
 def render_us_card(row) -> None:
-    """US drill card — FARS on top, census + traffic when their data exists."""
-    st.markdown(base_html(row, top=fars_html(row), census=acs_html(row),
-                          traffic=hpms_html(row)), unsafe_allow_html=True)
+    """US drill card — FARS + rates on top; census, NRI, jobs, traffic, flows
+    sections light up as their parquets exist."""
+    st.markdown(base_html(row,
+                          top=fars_html(row) + rates_html(row),
+                          census=acs_html(row) + nri_html(row) + lodes_html(row),
+                          traffic=hpms_html(row),
+                          flows=flows_html(row)), unsafe_allow_html=True)
 
 
 def parse_selection(event, current):
@@ -350,6 +450,12 @@ if scope == US:
             opts = {"Traffic · AADT": ("hpms_aadt_max", "{:,.0f} veh/day"), **opts}
         if "fars_crashes" in df5.columns:
             opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **opts}
+        for label, col_fmt in {
+            "Jobs · LODES": ("lodes_jobs", "{:,.0f} workplace jobs"),
+            "Hazard $ · FEMA NRI": ("nri_eal_alloc", "${:,.0f}/yr expected loss"),
+        }.items():
+            if col_fmt[0] in df5.columns:
+                opts[label] = col_fmt
         layer_name = st.selectbox("Shade the map by", list(opts), index=0, key="atlas_layer_us")
         df5 = apply_layer(df5, *opts[layer_name], elev_max=45000)
 
@@ -404,6 +510,14 @@ if scope == US:
             opts = {"Traffic · AADT": ("hpms_aadt_max", "{:,.0f} veh/day"), **opts}
         if "fars_crashes" in kids.columns:
             opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **opts}
+        for label, col_fmt in {
+            "Jobs · LODES": ("lodes_jobs", "{:,.0f} workplace jobs"),
+            "Hazard $ · FEMA NRI": ("nri_eal_alloc", "${:,.0f}/yr expected loss"),
+            "Rate · visits/resident": ("drv_visits_per_resident", "{:,.1f}× visits/resident"),
+            "Rate · fatal/100k AADT": ("drv_fatal_per_100k_aadt", "{:.2f}/yr per 100k veh·day"),
+        }.items():
+            if col_fmt[0] in kids.columns:
+                opts[label] = col_fmt
         layer_name = st.selectbox("Shade the map by", list(opts), index=0, key="atlas_layer_us_drill")
         col, valfmt = opts[layer_name]
         kids = apply_layer(kids, col, valfmt)
