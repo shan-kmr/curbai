@@ -32,11 +32,42 @@ from curbai.loader import (
 )
 
 st.set_page_config(
-    page_title="CurbIndex — geospatial intelligence for urban mobility",
-    page_icon="🛰️",
+    page_title="Janus — The Visualisation Layer",
+    page_icon="🔭",
     layout="wide",
     initial_sidebar_state="auto",
 )
+
+# Janus house style injected as custom CSS — paper ground, cobalt accent, serif
+# argument + mono instrument, Streamlit chrome hidden. This is what makes it read
+# as the Janus demos rather than a default Streamlit app.
+BRAND_CSS = """<style>
+:root{--paper:#F6F4EF;--ink:#1A1815;--cobalt:#1E3A8A;--muted:#8C887E;--line:#E0DDD4;--fg2:#4E4B45;}
+[data-testid="stHeader"],#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stStatusWidget"],[data-testid="stDecoration"]{visibility:hidden;height:0;display:none;}
+.stApp,[data-testid="stAppViewContainer"],[data-testid="stSidebar"]{background:var(--paper);}
+html,body,[data-testid="stAppViewContainer"] *{color:var(--ink);}
+.block-container{padding-top:2.4rem;max-width:1180px;}
+h1,h2,h3,h4{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif!important;letter-spacing:-.01em;color:var(--ink)!important;}
+[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] *{font-family:ui-monospace,"SF Mono",Menlo,monospace!important;color:var(--muted)!important;letter-spacing:.02em;}
+[data-baseweb="tab-list"]{gap:2px;border-bottom:1px solid var(--line);}
+button[data-baseweb="tab"]{font-family:ui-monospace,"SF Mono",Menlo,monospace!important;letter-spacing:.06em;text-transform:uppercase;font-size:.7rem!important;}
+[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{background:var(--cobalt)!important;}
+.stButton>button,button[kind="secondary"]{border:1px solid var(--line)!important;border-radius:4px!important;color:var(--ink)!important;background:#fff!important;font-family:ui-monospace,Menlo,monospace!important;font-size:.72rem!important;letter-spacing:.04em;}
+[data-testid="stMetricValue"]{font-family:"Iowan Old Style",Palatino,Georgia,serif!important;color:var(--cobalt)!important;}
+a{color:var(--cobalt)!important;}
+.janus-eyebrow{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.7rem;letter-spacing:.22em;text-transform:uppercase;color:var(--cobalt);margin:0 0 6px;}
+.janus-title{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:2.5rem;font-weight:600;letter-spacing:-.015em;color:var(--ink);margin:0 0 8px;line-height:1.03;}
+.janus-dek{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:1.04rem;color:var(--fg2);margin:0;max-width:64ch;line-height:1.5;}
+.janus-dek .sig{color:var(--cobalt);font-style:italic;}
+.janus-rule{height:1px;background:var(--line);margin:16px 0 4px;}
+</style>"""
+
+BRAND_HEADER = """
+<p class="janus-eyebrow">Janus · The Visualisation Layer</p>
+<div class="janus-title">Every block, decoded.</div>
+<p class="janus-dek">Click any cell — a score, the drivers behind it, its lookalikes, its walk-time catchment. San Francisco, from open data alone. <span class="sig">Consented movement in. Defensible signal out.</span></p>
+<div class="janus-rule"></div>
+"""
 
 SF_CENTER_LAT = 37.773
 SF_CENTER_LON = -122.441
@@ -706,6 +737,9 @@ def render_temporal_tab(df: pd.DataFrame, sim: similarity.SimilarityIndex) -> No
 
 def main() -> None:
     init_state()
+    st.markdown(BRAND_CSS, unsafe_allow_html=True)
+    st.markdown(BRAND_HEADER, unsafe_allow_html=True)
+    st.markdown("")
 
     if not SCORED_PATH.exists():
         st.error(f"Missing `{SCORED_PATH.name}`. Run the data pipeline first.")
@@ -713,15 +747,6 @@ def main() -> None:
 
     df = get_data()
     sim, _ = get_similarity_index(df)
-
-    st.markdown("# CurbIndex")
-    st.caption(
-        "Geospatial intelligence for urban mobility, built on open data. "
-        "A prototype demonstrating what becomes possible when you can score "
-        "every block in a city for commercial and mobility readiness — "
-        "using only open-source data. See the Methodology page in the sidebar."
-    )
-    st.markdown("")
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Site Intelligence",
