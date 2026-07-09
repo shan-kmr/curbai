@@ -24,18 +24,21 @@ st.set_page_config(page_title="Janus — The Hex Atlas", page_icon="🔬", layou
 ui.inject()
 ui.header(
     "Janus · The Hex Atlas — New York",
-    "Every crash, by hex.",
-    "796,756 NYPD collisions, keyed to H3 res-9. Click a cell — the raw breakdown, "
-    "not a score. <span class='sig'>Consented movement in. Defensible signal out.</span>",
+    "Every hex, decoded.",
+    "Click a cell — crashes, who lives there, the built form — all raw, all open data. "
+    "The map is shaded by collision count. <span class='sig'>Consented movement in. Defensible signal out.</span>",
 )
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "nyc_crashes_h3.parquet"
+BASE = Path(__file__).resolve().parents[1] / "data" / "nyc_base_h3.parquet"
 DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 @st.cache_data(show_spinner="Loading crash grid…")
 def load() -> pd.DataFrame:
     df = pd.read_parquet(DATA)
+    if BASE.exists():
+        df = df.merge(pd.read_parquet(BASE), on="h3_index", how="left")
     mx = np.log1p(df.crashes.max())
     df["_norm"] = np.log1p(df.crashes) / mx
     df["_color"] = df["_norm"].apply(ui.count_color)
@@ -50,6 +53,15 @@ def fmt_hour(h: int) -> str:
     return f"{(h % 12) or 12}{ampm}"
 
 
+def _g(row: pd.Series, col: str):
+    v = row.get(col)
+    return None if v is None or (isinstance(v, float) and np.isnan(v)) else v
+
+
+def _fmt(v, f: str = "{:,.0f}") -> str:
+    return "—" if v is None else f.format(v)
+
+
 def render_card(row: pd.Series) -> None:
     hh = json.loads(row.hour_hist)
     facs = json.loads(row.top_factors)
@@ -60,22 +72,33 @@ def render_card(row: pd.Series) -> None:
         for k, v in facs
     ) or '<div class="jx-fac"><span class="c">— none coded —</span></div>'
 
+    pop, dens = _g(row, "population"), _g(row, "pop_density")
+    bc, fl, mh = _g(row, "building_count"), _g(row, "avg_floors"), _g(row, "max_height")
+    ar, nl = _g(row, "total_building_area"), _g(row, "nightlight_2021")
+
     st.markdown(f"""
     <div class="jx-card">
-      <div class="jx-cid">R9 · {row.h3_index[-12:]} · New York</div>
+      <div class="jx-cid">R9 · {row.h3_index[-12:]} · New York · 0.105 km²</div>
+      <div class="jx-lab" style="margin-top:6px">◆ Safety — NYPD Vision Zero</div>
       <div class="jx-big">{row.crashes:,}<small> collisions on record</small></div>
       <div class="jx-row"><span class="k">People killed</span><span class="v"><b>{row.killed}</b></span></div>
       <div class="jx-row"><span class="k">People injured</span><span class="v">{row.injured:,}</span></div>
-      <div class="jx-lab">By victim</div>
-      <div class="jx-row"><span class="k">Pedestrian</span><span class="v">{row.ped_inj} injured · {row.ped_kill} killed</span></div>
-      <div class="jx-row"><span class="k">Cyclist</span><span class="v">{row.cyc_inj} injured · {row.cyc_kill} killed</span></div>
-      <div class="jx-row"><span class="k">Motorist</span><span class="v">{row.mot_inj:,} injured · {row.mot_kill} killed</span></div>
+      <div class="jx-row"><span class="k">Pedestrian</span><span class="v">{row.ped_inj} inj · {row.ped_kill} killed</span></div>
+      <div class="jx-row"><span class="k">Cyclist</span><span class="v">{row.cyc_inj} inj · {row.cyc_kill} killed</span></div>
+      <div class="jx-row"><span class="k">Motorist</span><span class="v">{row.mot_inj:,} inj · {row.mot_kill} killed</span></div>
       <div class="jx-row"><span class="k">Peak</span><span class="v"><b>{DOW[row.peak_dow] if row.peak_dow>=0 else '—'} {fmt_hour(row.peak_hour)}</b></span></div>
       <div class="jx-lab">By hour of day</div>
       <div class="jx-hist">{bars}</div>
       <div class="jx-hticks"><span>12a</span><span>6a</span><span>12p</span><span>6p</span><span>11p</span></div>
       <div class="jx-lab">Top contributing factors</div>
       {fac_html}
+      <div class="jx-lab" style="margin-top:16px">◆ Who's here — WorldPop / GHSL</div>
+      <div class="jx-row"><span class="k">Population</span><span class="v"><b>{_fmt(pop)}</b> residents</span></div>
+      <div class="jx-lab">◆ Built form — Overture buildings</div>
+      <div class="jx-row"><span class="k">Buildings</span><span class="v"><b>{_fmt(bc)}</b> · avg {_fmt(fl, '{:.0f}')} fl</span></div>
+      <div class="jx-row"><span class="k">Tallest</span><span class="v">{_fmt(mh, '{:.0f}')} m</span></div>
+      <div class="jx-row"><span class="k">Footprint</span><span class="v">{_fmt(ar/1000 if ar else None)}k m²</span></div>
+      <div class="jx-row"><span class="k">Night-lights (2021)</span><span class="v">{_fmt(nl, '{:.0f}')}</span></div>
     </div>
     """, unsafe_allow_html=True)
 
