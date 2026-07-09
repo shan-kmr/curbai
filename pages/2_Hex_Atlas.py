@@ -69,6 +69,9 @@ LODESOD = DATADIR / "lodesod_us_h3.parquet"
 GDELT = DATADIR / "gdelt_us_h3.parquet"
 EAGLEI = DATADIR / "eaglei_us_h3.parquet"
 NDVI = DATADIR / "ndvi_us_h3.parquet"
+MLY = DATADIR / "mapillary_us_h3.parquet"
+OSMPED = DATADIR / "osmped_us_h3.parquet"
+WZDX = DATADIR / "wzdx_us_h3.parquet"
 DERIVED = DATADIR / "us_derived_h3.parquet"
 WM = DATADIR / "worldmove_us_h3.parquet"
 
@@ -109,7 +112,8 @@ def load_us_children(r5: str) -> pd.DataFrame:
         f"SELECT * FROM read_parquet('{US_R9_GLOB}') WHERE res5 = ?", [r5]
     ).df()
     con.register("kids", kids[["h3_index"]])
-    for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI, DERIVED, WM):
+    for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI,
+                 MLY, OSMPED, WZDX, DERIVED, WM):
         if not side.exists():
             continue
         s = con.execute(
@@ -417,6 +421,46 @@ def eaglei_html(row) -> str:
       <div class="jx-row"><span class="k">Worst event</span><span class="v">{_fmt(_g(row, 'eaglei_max_out'))} customers out</span></div>"""
 
 
+def mly_html(row) -> str:
+    """Street furniture — Mapillary detections (coverage-biased: counts are
+    visibility-weighted by how much imagery exists)."""
+    tot = _g(row, "mly_features_total")
+    if tot is None:
+        return ""
+    return f"""
+      <div class="jx-lab jx-sec">◆ Streetscape — Mapillary · detections</div>
+      <div class="jx-row"><span class="k">Crosswalks</span><span class="v"><b>{_fmt(_g(row, 'mly_crosswalks'))}</b></span></div>
+      <div class="jx-row"><span class="k">Lights · poles</span><span class="v">{_fmt(_g(row, 'mly_streetlights'))} · {_fmt(_g(row, 'mly_poles'))}</span></div>
+      <div class="jx-row"><span class="k">Cones (construction)</span><span class="v">{_fmt(_g(row, 'mly_cones'))}</span></div>
+      <div class="jx-row"><span class="k">All detections</span><span class="v">{_fmt(tot)}</span></div>"""
+
+
+def osmped_html(row) -> str:
+    """Pedestrian/curb attributes — OSM tags."""
+    if all(_g(row, c) is None for c in ("osm_sidewalk_len_m", "osm_cross_signalized",
+                                        "osm_kerb_lowered", "osm_cross_marked")):
+        return ""
+    kerbs = f"{_fmt(_g(row, 'osm_kerb_lowered'))} lowered · {_fmt(_g(row, 'osm_kerb_raised'))} raised"
+    return f"""
+      <div class="jx-lab jx-sec">◆ Pedestrian — OpenStreetMap</div>
+      <div class="jx-row"><span class="k">Sidewalk mapped</span><span class="v"><b>{_fmt(_g(row, 'osm_sidewalk_len_m'))}</b> m</span></div>
+      <div class="jx-row"><span class="k">Crossings</span><span class="v">{_fmt(_g(row, 'osm_cross_signalized'))} signal · {_fmt(_g(row, 'osm_cross_marked'))} marked · {_fmt(_g(row, 'osm_cross_unmarked'))} unmarked</span></div>
+      <div class="jx-row"><span class="k">Kerbs</span><span class="v">{kerbs}</span></div>
+      <div class="jx-row"><span class="k">Tactile paving</span><span class="v">{_fmt(_g(row, 'osm_tactile'))}</span></div>"""
+
+
+def wzdx_html(row) -> str:
+    """Live work zones — WZDx snapshot."""
+    z = _g(row, "wzdx_zones")
+    if z is None:
+        return ""
+    snap = str(_g(row, "wzdx_snapshot") or "")[:10]
+    return f"""
+      <div class="jx-lab jx-sec">◆ Work zones — WZDx · snapshot {snap}</div>
+      <div class="jx-row"><span class="k">Active zones</span><span class="v"><b>{_fmt(z)}</b> · {_fmt(_g(row, 'wzdx_lane_impact'))} lane-closing</span></div>
+      <div class="jx-row"><span class="k">Type</span><span class="v">{_g(row, 'wzdx_top_type') or '—'}</span></div>"""
+
+
 def flows_html(row) -> str:
     if _g(row, "wm_inflow") is None and _g(row, "wm_outflow") is None:
         return ""
@@ -438,12 +482,14 @@ def render_card(row) -> None:
 
 def render_us_card(row) -> None:
     """US drill card — FARS + rates on top; census, NRI, jobs, worker-origins,
-    traffic, flows, news, power sections light up as their parquets exist."""
+    traffic, work zones, flows, news, power, streetscape, pedestrian sections
+    light up as their parquets exist."""
     st.markdown(base_html(row,
                           top=fars_html(row) + rates_html(row),
                           census=acs_html(row) + nri_html(row) + lodes_html(row) + lodesod_html(row),
-                          traffic=hpms_html(row),
-                          flows=flows_html(row) + gdelt_html(row) + eaglei_html(row)),
+                          traffic=hpms_html(row) + wzdx_html(row),
+                          flows=flows_html(row) + gdelt_html(row) + eaglei_html(row),
+                          street=mly_html(row) + osmped_html(row)),
                 unsafe_allow_html=True)
 
 
@@ -522,6 +568,7 @@ if scope == US:
             "News events · GDELT": ("gdelt_events", "{:,.0f} events / 180 d"),
             "Greenness · NDVI": ("ndvi_summer", "{:.2f} NDVI"),
             "Hrs dark/cust · EAGLE-I": ("eaglei_hrs_dark_per_cust_yr", "{:,.1f} h dark/cust/yr"),
+            "Work zones · WZDx": ("wzdx_zones", "{:,.0f} active zones"),
         }.items():
             if col_fmt[0] in df5.columns:
                 opts[label] = col_fmt
@@ -585,6 +632,10 @@ if scope == US:
             "News events · GDELT": ("gdelt_events", "{:,.0f} events / 180 d"),
             "Greenness · NDVI": ("ndvi_summer", "{:.2f} NDVI"),
             "Hrs dark/cust · EAGLE-I": ("eaglei_hrs_dark_per_cust_yr", "{:,.1f} h dark/cust/yr"),
+            "Work zones · WZDx": ("wzdx_zones", "{:,.0f} active zones"),
+            "Crosswalks · Mapillary": ("mly_crosswalks", "{:,.0f} crosswalk detections"),
+            "Cones · Mapillary": ("mly_cones", "{:,.0f} cones (construction)"),
+            "Sidewalk · OSM": ("osm_sidewalk_len_m", "{:,.0f} m sidewalk"),
             "Rate · visits/resident": ("drv_visits_per_resident", "{:,.1f}× visits/resident"),
             "Rate · fatal/100k AADT": ("drv_fatal_per_100k_aadt", "{:.2f}/yr per 100k veh·day"),
         }.items():

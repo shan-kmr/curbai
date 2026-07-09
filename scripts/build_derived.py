@@ -45,6 +45,7 @@ NRI = DATA / "nri_us_h3.parquet"
 GDELT = DATA / "gdelt_us_h3.parquet"
 EAGLEI = DATA / "eaglei_us_h3.parquet"
 NDVI = DATA / "ndvi_us_h3.parquet"
+WZDX = DATA / "wzdx_us_h3.parquet"
 OUT = DATA / "us_derived_h3.parquet"
 WM_OUT = DATA / "worldmove_us_h3.parquet"
 
@@ -147,6 +148,9 @@ def main() -> None:
         rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
     if GDELT.exists():
         r = parent_roll(GDELT, {"gdelt_events": ("gdelt_events", "sum")})
+        rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
+    if WZDX.exists():
+        r = parent_roll(WZDX, {"wzdx_zones": ("wzdx_zones", "sum")})
         rolls = r if rolls is None else rolls.merge(r, on="h3_index", how="outer")
     if NDVI.exists():
         r = con.execute(f"""
