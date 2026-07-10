@@ -90,7 +90,7 @@ def ensure_data() -> None:
     snapshot_download(DATASET_REPO, repo_type="dataset",
                       local_dir=DATADIR.parent,
                       allow_patterns=["data/*.parquet", "data/us_r9/*.parquet",
-                                      "data/us_boundary.wkt"],
+                                      "data/us_lod/*.parquet", "data/us_boundary.wkt"],
                       token=os.environ.get("HF_TOKEN"))
 
 
@@ -573,127 +573,127 @@ scopes = ([US] if US_R5.exists() else []) + list(CITIES)
 scope = st.sidebar.radio("Where", scopes, index=0)
 
 if scope == US:
-    r5_sel = st.session_state.get("us_r5_sel")
+    # ---- the tiled map: one continuous res-5 → res-9 ladder ----
+    from curbai.janusmap import janusmap  # noqa: E402
 
-    if r5_sel is None:
-        # ---- national overview (res-5) ----
-        df5 = load_us_overview()
-        opts = dict(LAYERS)
-        if "hpms_aadt_max" in df5.columns:
-            opts = {"Traffic · AADT": ("hpms_aadt_max", "{:,.0f} veh/day"), **opts}
-        if "fars_crashes" in df5.columns:
-            opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **opts}
-        for label, col_fmt in {
-            "Jobs · LODES": ("lodes_jobs", "{:,.0f} workplace jobs"),
-            "Hazard $ · FEMA NRI": ("nri_eal_alloc", "${:,.0f}/yr expected loss"),
-            "News events · GDELT": ("gdelt_events", "{:,.0f} events / 180 d"),
-            "Greenness · NDVI": ("ndvi_summer", "{:.2f} NDVI"),
-            "Hrs dark/cust · EAGLE-I": ("eaglei_hrs_dark_per_cust_yr", "{:,.1f} h dark/cust/yr"),
-            "Work zones · WZDx": ("wzdx_zones", "{:,.0f} active zones"),
-        }.items():
-            if col_fmt[0] in df5.columns:
-                opts[label] = col_fmt
-        layer_name = st.selectbox("Shade the map by", list(opts), index=0, key="atlas_layer_us")
-        df5 = apply_layer(df5, *opts[layer_name], elev_max=45000)
+    LODF = {6: DATADIR / "us_lod" / "r6.parquet",
+            7: DATADIR / "us_lod" / "r7.parquet",
+            8: DATADIR / "us_lod" / "r8.parquet"}
+    TILE_LAYERS = {
+        "Structure · none": (None, ""),
+        "Population": ("kontur_population", "residents"),
+        "POIs / places": ("poi_count", "POIs"),
+        "Buildings": ("building_count", "buildings"),
+        "Movement · visits": ("wt_visit_count", "visits"),
+        "Roads": ("road_count", "road segments"),
+        "Night-lights": ("nightlight_2021", "brightness"),
+    }
 
-        extra = (f" · {int(df5.fars_crashes.sum()):,} fatal crashes · {int(df5.fars_killed.sum()):,} killed"
-                 if "fars_crashes" in df5.columns else "")
-        st.caption(f"United States · {len(df5):,} res-5 cells (~252 km²){extra} · "
-                   f"shaded by {layer_name.lower()} · click any cell to open it at 174 m")
+    @st.cache_data(show_spinner=False)
+    def r5_payload(col: str | None) -> dict:
+        df = pd.read_parquet(US_R5)
+        out = {"h3": df.h3_index.tolist(),
+               "lat": df.center_lat.round(4).tolist(),
+               "lon": df.center_lon.round(4).tolist(), "val": None}
+        if col and col in df.columns:
+            out["val"] = pd.to_numeric(df[col], errors="coerce").fillna(0).round(2).tolist()
+        return out
 
-        left, right = st.columns([2, 1], gap="large")
-        with left:
-            event = hex_map(df5, 39.5, -98.0, 3.4, 30, "us_deck",
-                            "<b>{_val_str}</b><br/>click to open this cell at 174 m")
-            new = parse_selection(event, None)
-            if new:
-                st.session_state["us_r5_sel"] = new
+    @st.cache_data(show_spinner=False)
+    def lod_vmax(col: str) -> dict:
+        con = duckdb.connect()
+        vm = {"5": float(pd.read_parquet(US_R5, columns=[col])[col].max() or 1)}
+        for res, f in LODF.items():
+            vm[str(res)] = float(con.execute(
+                f"SELECT max({col}) FROM read_parquet('{f.as_posix()}')").fetchone()[0] or 1)
+        vm["9"] = float(con.execute(
+            f"SELECT max({col}) FROM read_parquet('{US_R9_GLOB}')").fetchone()[0] or 1)
+        return vm
+
+    @st.cache_data(show_spinner=False)
+    def fetch_chunk(res: int, parent: str, col: str | None) -> dict:
+        con = duckdb.connect()
+        vcol = f", {col} AS val" if col else ""
+        if res == 9:
+            q = (f"SELECT h3_index{vcol}, building_count, avg_floors, max_height "
+                 f"FROM read_parquet('{US_R9_GLOB}') WHERE res5 = ?")
+        else:
+            q = f"SELECT h3_index{vcol} FROM read_parquet('{LODF[res].as_posix()}') WHERE res5 = ?"
+        d = con.execute(q, [parent]).df()
+        out = {"h3": d.h3_index.tolist(),
+               "val": d.val.fillna(0).round(2).tolist() if col else None}
+        if res == 9:
+            out["bc"] = d.building_count.fillna(0).astype(int).tolist()
+            out["fl"] = d.avg_floors.fillna(0).round(1).tolist()
+            out["mh"] = d.max_height.fillna(0).round(0).tolist()
+        return out
+
+    layer_name = st.selectbox("Shade the tiles by", list(TILE_LAYERS), index=0, key="jm_layer")
+    col, unit = TILE_LAYERS[layer_name]
+
+    # chunk cache — refetch (cheap, cached) when the shade column changes
+    if st.session_state.get("jm_col") != col:
+        st.session_state["jm_col"] = col
+        st.session_state["jm_chunks"] = {
+            res: {p: fetch_chunk(int(res), p, col) for p in parents}
+            for res, parents in st.session_state.get("jm_parents", {}).items()}
+    st.session_state.setdefault("jm_parents", {})
+    st.session_state.setdefault("jm_chunks", {})
+
+    focus = st.session_state.get("us_focus9")
+    st.caption("United States · zoom to split the tiles (res 5 → 9) · click a tile to dive, "
+               "click a street-level cell for its card · buildings appear up close"
+               + (f" · shaded by {layer_name.lower()}" if col else ""))
+
+    left, right = st.columns([2, 1], gap="large")
+    with left:
+        ev = janusmap(
+            r5=r5_payload(col),
+            chunks=st.session_state["jm_chunks"],
+            layer={"col": col, "label": unit, "vmax": (lod_vmax(col) if col else {})},
+            focus=focus, height=580, key="jm_map")
+        if ev and ev.get("nonce") != st.session_state.get("jm_nonce"):
+            st.session_state["jm_nonce"] = ev.get("nonce")
+            if ev.get("t") == "need":
+                res = str(ev["res"])
+                parents = st.session_state["jm_parents"].setdefault(res, set())
+                chunks = st.session_state["jm_chunks"].setdefault(res, {})
+                for p in ev.get("parents", []):
+                    if p not in parents:
+                        parents.add(p)
+                        chunks[p] = fetch_chunk(int(res), p, col)
                 st.rerun()
-        with right:
-            tot = {
-                "Res-5 cells": f"{len(df5):,}",
-                "Res-9 inside": f"{int(df5.n_res9.sum()):,}",
-                "POIs": f"{int(df5.poi_count.fillna(0).sum()):,}",
-                "Buildings": f"{int(df5.building_count.fillna(0).sum()):,}",
-                "Road segments": f"{int(df5.road_count.fillna(0).sum()):,}",
-            }
+            elif ev.get("t") == "select":
+                st.session_state["us_focus9"] = ev.get("h3")
+                st.rerun()
+    with right:
+        if focus:
+            kids = load_us_children(h3.h3_to_parent(focus, 5))
+            frow = kids[kids.h3_index == focus]
+            if len(frow):
+                render_us_card(frow.iloc[0])
+            st.caption("Raw open data, keyed to one H3 cell. No scores.")
+        else:
+            df5 = load_us_overview()
+            tot = {"Res-5 tiles": f"{len(df5):,}",
+                   "Res-9 inside": f"{int(df5.n_res9.sum()):,}",
+                   "POIs": f"{int(df5.poi_count.fillna(0).sum()):,}",
+                   "Buildings": f"{int(df5.building_count.fillna(0).sum()):,}"}
             if "fars_crashes" in df5.columns:
                 tot["Fatal crashes 22–24"] = f"{int(df5.fars_crashes.fillna(0).sum()):,}"
-                tot["Killed"] = f"{int(df5.fars_killed.fillna(0).sum()):,}"
-            rows = "".join(f'<div class="jx-row"><span class="k">{k}</span><span class="v"><b>{v}</b></span></div>'
-                           for k, v in tot.items())
+            rows = "".join(f'<div class="jx-row"><span class="k">{k}</span>'
+                           f'<span class="v"><b>{v}</b></span></div>' for k, v in tot.items())
             st.markdown(f"""
             <div class="jx-card">
-              <div class="jx-cid">United States · res-5 overview</div>
+              <div class="jx-cid">United States · tiled</div>
               <div class="jx-lab" style="margin-top:6px">◆ On this map</div>
               {rows}
               <div class="jx-lab jx-sec">◆ How it works</div>
-              <div class="jx-txt">Every cell is ~252 km². Click one and it opens as ~2,300
-              res-9 hexes at 174 m — each with its own raw data card: FARS fatal crashes,
-              census, buildings, places, movement, roads, climate.</div>
+              <div class="jx-txt">Zoom and the tiles split — res-5 country tiles down to
+              174 m street cells, with buildings rising up close. Click a street cell
+              and its full raw-data card opens here.</div>
             </div>""", unsafe_allow_html=True)
             st.caption("Raw open data, keyed to H3. No scores.")
-
-    else:
-        # ---- drill view (res-9 inside one res-5 cell) ----
-        if st.button("◀ Back to the United States"):
-            st.session_state.pop("us_r5_sel", None)
-            st.session_state.pop("us_focus", None)
-            st.rerun()
-
-        kids = load_us_children(r5_sel)
-        opts = dict(LAYERS)
-        if "hpms_aadt_max" in kids.columns:
-            opts = {"Traffic · AADT": ("hpms_aadt_max", "{:,.0f} veh/day"), **opts}
-        if "fars_crashes" in kids.columns:
-            opts = {"Fatal crashes 2022–24": ("fars_crashes", "{:,.0f} fatal crashes"), **opts}
-        for label, col_fmt in {
-            "Jobs · LODES": ("lodes_jobs", "{:,.0f} workplace jobs"),
-            "Hazard $ · FEMA NRI": ("nri_eal_alloc", "${:,.0f}/yr expected loss"),
-            "News events · GDELT": ("gdelt_events", "{:,.0f} events / 180 d"),
-            "Greenness · NDVI": ("ndvi_summer", "{:.2f} NDVI"),
-            "Hrs dark/cust · EAGLE-I": ("eaglei_hrs_dark_per_cust_yr", "{:,.1f} h dark/cust/yr"),
-            "Work zones · WZDx": ("wzdx_zones", "{:,.0f} active zones"),
-            "Crosswalks · Mapillary": ("mly_crosswalks", "{:,.0f} crosswalk detections"),
-            "Cones · Mapillary": ("mly_cones", "{:,.0f} cones (construction)"),
-            "Sidewalk · OSM": ("osm_sidewalk_len_m", "{:,.0f} m sidewalk"),
-            "Rate · visits/resident": ("drv_visits_per_resident", "{:,.1f}× visits/resident"),
-            "Rate · fatal/100k AADT": ("drv_fatal_per_100k_aadt", "{:.2f}/yr per 100k veh·day"),
-        }.items():
-            if col_fmt[0] in kids.columns:
-                opts[label] = col_fmt
-        layer_name = st.selectbox("Shade the map by", list(opts), index=0, key="atlas_layer_us_drill")
-        col, valfmt = opts[layer_name]
-        kids = apply_layer(kids, col, valfmt)
-
-        top = kids.nlargest(1, col)  # empty if the column is all-NaN (e.g. no fatal crashes here)
-        default_focus = ((top.iloc[0] if len(top) else kids.iloc[0]).h3_index
-                         if len(kids) else None)
-        if st.session_state.get("us_r5_prev") != r5_sel:
-            st.session_state["us_r5_prev"] = r5_sel
-            st.session_state["us_focus"] = default_focus
-
-        clat, clon = h3.h3_to_geo(r5_sel)
-        extra = (f" · {int(kids.fars_crashes.fillna(0).sum()):,} fatal crashes"
-                 if "fars_crashes" in kids.columns else "")
-        st.caption(f"United States · cell {r5_sel[-9:]} · {len(kids):,} res-9 hexes{extra} · "
-                   f"shaded by {layer_name.lower()} · click any hex for the full card")
-
-        focus = st.session_state.get("us_focus", default_focus)
-        frow = kids[kids.h3_index == focus]
-        left, right = st.columns([2, 1], gap="large")
-        with left:
-            event = hex_map(kids, clat, clon, 9.4, 50, "us_drill_deck",
-                            "<b>{_val_str}</b><br/>click for the full card",
-                            focus=frow, bearing=18.0)
-            new = parse_selection(event, st.session_state.get("us_focus"))
-            if new:
-                st.session_state["us_focus"] = new
-                st.rerun()
-        with right:
-            if len(frow) or len(kids):
-                render_us_card(frow.iloc[0] if len(frow) else kids.iloc[0])
-            st.caption("Raw open data, keyed to one H3 cell. No scores.")
 
 else:
     # ---- city view (res-9 direct) ----
