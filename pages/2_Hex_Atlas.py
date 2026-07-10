@@ -13,6 +13,7 @@ Two scopes:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -74,6 +75,26 @@ OSMPED = DATADIR / "osmped_us_h3.parquet"
 WZDX = DATADIR / "wzdx_us_h3.parquet"
 DERIVED = DATADIR / "us_derived_h3.parquet"
 WM = DATADIR / "worldmove_us_h3.parquet"
+
+DATASET_REPO = "skay97/curbai-data"
+
+
+@st.cache_resource(show_spinner="First boot — pulling the data layers from the hub…")
+def ensure_data() -> None:
+    """The Space ships code only (1 GB cap); layers live in a private HF
+    dataset. No-op when data is already on disk (local dev / warm container).
+    Needs HF_TOKEN as a Space secret to read the private repo."""
+    if US_R5.exists():
+        return
+    from huggingface_hub import snapshot_download
+    snapshot_download(DATASET_REPO, repo_type="dataset",
+                      local_dir=DATADIR.parent,
+                      allow_patterns=["data/*.parquet", "data/us_r9/*.parquet",
+                                      "data/us_boundary.wkt"],
+                      token=os.environ.get("HF_TOKEN"))
+
+
+ensure_data()
 
 
 # ---------- loaders ----------
