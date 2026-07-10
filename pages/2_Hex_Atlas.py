@@ -76,6 +76,7 @@ WZDX = DATADIR / "wzdx_us_h3.parquet"
 SLOPE = DATADIR / "slope_nyc_h3.parquet"
 SWP = DATADIR / "sidewalkphys_nyc_h3.parquet"
 SWD = DATADIR / "nycsw_width_h3.parquet"
+OSMW = DATADIR / "osmwidth_us_h3.parquet"
 DERIVED = DATADIR / "us_derived_h3.parquet"
 WM = DATADIR / "worldmove_us_h3.parquet"
 
@@ -137,7 +138,7 @@ def load_us_children(r5: str) -> pd.DataFrame:
     ).df()
     con.register("kids", kids[["h3_index"]])
     for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI,
-                 MLY, OSMPED, WZDX, SLOPE, SWP, SWD, DERIVED, WM):
+                 MLY, OSMPED, WZDX, SLOPE, SWP, SWD, OSMW, DERIVED, WM):
         if not side.exists():
             continue
         s = con.execute(
@@ -471,6 +472,16 @@ def osmped_html(row) -> str:
     if w is not None:
         rows.append(f'<div class="jx-row"><span class="k">Effective width</span>'
                     f'<span class="v"><b>{w:.1f} m</b> · 2·area/perimeter, NYC planimetrics</span></div>')
+    ow = _g(row, "osmw_width_med_m")
+    if ow is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Tagged width</span>'
+                    f'<span class="v"><b>{ow:.1f} m</b> · OSM width=*, n={_fmt(_g(row, "osmw_width_n"), "{:.0f}")}</span></div>')
+    sm = _g(row, "osmw_smooth_med")
+    if sm is not None:
+        lbl = ["excellent", "good", "intermediate", "bad", "very bad",
+               "horrible", "very horrible", "impassable"][int(min(7, max(0, round(sm))))]
+        rows.append(f'<div class="jx-row"><span class="k">Tagged smoothness</span>'
+                    f'<span class="v">{lbl} · n={_fmt(_g(row, "osmw_smooth_n"), "{:.0f}")}</span></div>')
     sl = _g(row, "osm_sidewalk_len_m")
     if sl is not None:
         rows.append(f'<div class="jx-row"><span class="k">Sidewalk mapped</span>'
