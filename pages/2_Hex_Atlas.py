@@ -75,6 +75,7 @@ OSMPED = DATADIR / "osmped_us_h3.parquet"
 WZDX = DATADIR / "wzdx_us_h3.parquet"
 SLOPE = DATADIR / "slope_nyc_h3.parquet"
 SWP = DATADIR / "sidewalkphys_nyc_h3.parquet"
+SWD = DATADIR / "nycsw_width_h3.parquet"
 DERIVED = DATADIR / "us_derived_h3.parquet"
 WM = DATADIR / "worldmove_us_h3.parquet"
 
@@ -136,7 +137,7 @@ def load_us_children(r5: str) -> pd.DataFrame:
     ).df()
     con.register("kids", kids[["h3_index"]])
     for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI,
-                 MLY, OSMPED, WZDX, SLOPE, SWP, DERIVED, WM):
+                 MLY, OSMPED, WZDX, SLOPE, SWP, SWD, DERIVED, WM):
         if not side.exists():
             continue
         s = con.execute(
@@ -459,17 +460,40 @@ def mly_html(row) -> str:
 
 
 def osmped_html(row) -> str:
-    """Pedestrian/curb attributes — OSM tags."""
+    """Pedestrian/curb attributes — OSM tags + NYC planimetric width, with
+    decision ratios (share of controlled crossings, share of accessible kerbs)."""
     if all(_g(row, c) is None for c in ("osm_sidewalk_len_m", "osm_cross_signalized",
-                                        "osm_kerb_lowered", "osm_cross_marked")):
+                                        "osm_kerb_lowered", "osm_cross_marked",
+                                        "swd_width_eff_m")):
         return ""
-    kerbs = f"{_fmt(_g(row, 'osm_kerb_lowered'))} lowered · {_fmt(_g(row, 'osm_kerb_raised'))} raised"
-    return f"""
-      <div class="jx-lab jx-sec">◆ Pedestrian — OpenStreetMap</div>
-      <div class="jx-row"><span class="k">Sidewalk mapped</span><span class="v"><b>{_fmt(_g(row, 'osm_sidewalk_len_m'))}</b> m</span></div>
-      <div class="jx-row"><span class="k">Crossings</span><span class="v">{_fmt(_g(row, 'osm_cross_signalized'))} signal · {_fmt(_g(row, 'osm_cross_marked'))} marked · {_fmt(_g(row, 'osm_cross_unmarked'))} unmarked</span></div>
-      <div class="jx-row"><span class="k">Kerbs</span><span class="v">{kerbs}</span></div>
-      <div class="jx-row"><span class="k">Tactile paving</span><span class="v">{_fmt(_g(row, 'osm_tactile'))}</span></div>"""
+    rows = []
+    w = _g(row, "swd_width_eff_m")
+    if w is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Effective width</span>'
+                    f'<span class="v"><b>{w:.1f} m</b> · 2·area/perimeter, NYC planimetrics</span></div>')
+    sl = _g(row, "osm_sidewalk_len_m")
+    if sl is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Sidewalk mapped</span>'
+                    f'<span class="v"><b>{_fmt(sl)}</b> m</span></div>')
+    sig, mk, um = (_g(row, "osm_cross_signalized") or 0, _g(row, "osm_cross_marked") or 0,
+                   _g(row, "osm_cross_unmarked") or 0)
+    if sig + mk + um > 0:
+        ctrl = 100 * (sig + mk) / (sig + mk + um)
+        rows.append(f'<div class="jx-row"><span class="k">Crossings</span>'
+                    f'<span class="v">{sig:.0f} signal · {mk:.0f} marked · {um:.0f} unmarked → '
+                    f'<b>{ctrl:.0f}%</b> controlled</span></div>')
+    lo, fl_, ra = (_g(row, "osm_kerb_lowered") or 0, _g(row, "osm_kerb_flush") or 0,
+                   _g(row, "osm_kerb_raised") or 0)
+    if lo + fl_ + ra > 0:
+        acc = 100 * (lo + fl_) / (lo + fl_ + ra)
+        rows.append(f'<div class="jx-row"><span class="k">Kerbs</span>'
+                    f'<span class="v">{lo:.0f} lowered · {fl_:.0f} flush · {ra:.0f} raised → '
+                    f'<b>{acc:.0f}%</b> rollable</span></div>')
+    t = _g(row, "osm_tactile")
+    if t is not None and t > 0:
+        rows.append(f'<div class="jx-row"><span class="k">Tactile paving</span>'
+                    f'<span class="v">{t:.0f}</span></div>')
+    return '<div class="jx-lab jx-sec">◆ Pedestrian — OSM / NYC planimetrics</div>' + "".join(rows)
 
 
 def wzdx_html(row) -> str:

@@ -57,7 +57,7 @@ function activeRes(z){ let r=5; for(const[res,mz] of LADDER) if(z>=mz) r=res; re
 /* ---------- ingest args ---------- */
 function ingest(a){
   args=a;
-  if(a.view0 && !viewInit){ viewInit=true; view={...view, ...a.view0};
+  if(a.view0 && !viewInit && !sessionStorage.getItem("jm_view")){ viewInit=true; view={...view, ...a.view0};
     if(deckgl) deckgl.setProps({initialViewState:{...view}}); }
   // res-5 baseline (columnar)
   if(a.r5 && !store["5"]){
@@ -150,12 +150,12 @@ function hexLayer(res, rows, isTop){
     getHexagon:d=>d.id,
     filled:true, extruded:false, stroked:true,
     getFillColor:d=>{
-      if(structure||d.v==null) return [30,58,138, isTop?10:4];
+      if(structure||d.v==null) return [30,58,138, isTop?5:2];
       const t=Math.log1p(Math.max(0,d.v))/Math.log1p(vmax||1);
-      return [...ramp(t), 26+t*150];
+      return [...ramp(t), t<0.04 ? 5 : 10+t*85];
     },
-    getLineColor:[...LINE, isTop?70:26],
-    lineWidthMinPixels: isTop?1:0.5,
+    getLineColor:[...LINE, isTop?40:13],
+    lineWidthMinPixels: isTop?0.75:0.4,
     pickable:isTop, autoHighlight:isTop,
     highlightColor:[30,58,138,50],
     transitions:{getFillColor:350, getLineColor:350},
@@ -168,7 +168,7 @@ function redraw(){
   const z=view.zoom, res=activeRes(z), layers=[];
   layers.push(new deck.TileLayer({
     id:"base", data:"https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
-    minZoom:0, maxZoom:19, tileSize:256, opacity:0.9,
+    minZoom:0, maxZoom:19, tileSize:256, opacity:1,
     renderSubLayers:p=>{const{west,south,east,north}=p.tile.bbox;
       return new deck.BitmapLayer(p,{data:null,image:p.data,bounds:[west,south,east,north]});},
   }));
@@ -226,11 +226,15 @@ function onHover(info){
 }
 
 /* ---------- boot ---------- */
+function saveView(){ try{ const {latitude,longitude,zoom,pitch,bearing}=view;
+  sessionStorage.setItem("jm_view", JSON.stringify({latitude,longitude,zoom,pitch,bearing})); }catch(e){} }
 function boot(){
+  try{ const sv=sessionStorage.getItem("jm_view");
+       if(sv) view={...view, ...JSON.parse(sv)}; }catch(e){}
   deckgl=new deck.DeckGL({
     container:"map", controller:{inertia:260},
     initialViewState:view,
-    onViewStateChange:({viewState})=>{ view=viewState; maybeNeed();
+    onViewStateChange:({viewState})=>{ view=viewState; saveView(); maybeNeed();
       hud.textContent="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":""); },
     onClick:onClick, onHover:onHover,
     getCursor:({isHovering})=>isHovering?"pointer":"grab",
