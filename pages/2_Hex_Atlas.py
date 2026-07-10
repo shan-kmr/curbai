@@ -173,7 +173,8 @@ def _g(row, col):
     if col not in row.index:
         return None
     v = row.get(col)
-    return None if v is None or (isinstance(v, float) and np.isnan(v)) else v
+    # pd.isna catches numpy float32/float64 NaN too — isinstance(float) doesn't
+    return None if v is None or (not isinstance(v, str) and pd.isna(v)) else v
 
 
 def _fmt(v, f="{:,.0f}") -> str:
