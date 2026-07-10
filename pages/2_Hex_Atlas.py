@@ -73,6 +73,8 @@ NDVI = DATADIR / "ndvi_us_h3.parquet"
 MLY = DATADIR / "mapillary_us_h3.parquet"
 OSMPED = DATADIR / "osmped_us_h3.parquet"
 WZDX = DATADIR / "wzdx_us_h3.parquet"
+SLOPE = DATADIR / "slope_nyc_h3.parquet"
+SWP = DATADIR / "sidewalkphys_nyc_h3.parquet"
 DERIVED = DATADIR / "us_derived_h3.parquet"
 WM = DATADIR / "worldmove_us_h3.parquet"
 
@@ -134,7 +136,7 @@ def load_us_children(r5: str) -> pd.DataFrame:
     ).df()
     con.register("kids", kids[["h3_index"]])
     for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI,
-                 MLY, OSMPED, WZDX, DERIVED, WM):
+                 MLY, OSMPED, WZDX, SLOPE, SWP, DERIVED, WM):
         if not side.exists():
             continue
         s = con.execute(
@@ -482,6 +484,26 @@ def wzdx_html(row) -> str:
       <div class="jx-row"><span class="k">Type</span><span class="v">{_g(row, 'wzdx_top_type') or '—'}</span></div>"""
 
 
+def phys_html(row) -> str:
+    """Sidewalk physics — measured walk-vibration where we walked, 3DEP slope
+    everywhere in the pilot grid. Honest flags: measured vs inferred."""
+    sl = _g(row, "slope_pct_med")
+    rg = _g(row, "swp_rough_g_rms")
+    if sl is None and rg is None:
+        return ""
+    rows = []
+    if rg is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Walk vibration</span>'
+                    f'<span class="v"><b>{rg:.2f} g</b> RMS · measured, '
+                    f'{_fmt(_g(row, "swp_walks"), "{:.0f}")} walk(s)</span></div>')
+    if sl is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Terrain slope</span>'
+                    f'<span class="v"><b>{sl:.1f}%</b> med · {_fmt(_g(row, "slope_pct_p95"), "{:.0f}")}% p95 · inferred (3DEP 10 m)</span></div>')
+        rows.append(f'<div class="jx-row"><span class="k">Elevation</span>'
+                    f'<span class="v">{_fmt(_g(row, "elev_m_med"), "{:.0f}")} m · range {_fmt(_g(row, "elev_range_m"), "{:.0f}")} m</span></div>')
+    return ('<div class="jx-lab jx-sec">\u25c6 Sidewalk physics \u2014 walks / 3DEP</div>' + "".join(rows))
+
+
 def flows_html(row) -> str:
     if _g(row, "wm_inflow") is None and _g(row, "wm_outflow") is None:
         return ""
@@ -493,7 +515,7 @@ def flows_html(row) -> str:
 
 def render_card(row) -> None:
     """City card — NYC gets Vision Zero + streetscape."""
-    street = ""
+    street = phys_html(row)
     sw = _g(row, "nycsw_sidewalk_length_m")
     if sw is not None:
         street = (f'<div class="jx-lab jx-sec">◆ Streetscape — NYC DOT</div>'
@@ -510,7 +532,7 @@ def render_us_card(row) -> None:
                           census=acs_html(row) + nri_html(row) + lodes_html(row) + lodesod_html(row),
                           traffic=hpms_html(row) + wzdx_html(row),
                           flows=flows_html(row) + gdelt_html(row) + eaglei_html(row),
-                          street=mly_html(row) + osmped_html(row)),
+                          street=phys_html(row) + mly_html(row) + osmped_html(row)),
                 unsafe_allow_html=True)
 
 
