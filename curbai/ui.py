@@ -11,7 +11,7 @@ from __future__ import annotations
 import streamlit as st
 
 BRAND_CSS = """<style>
-:root{--ground:#FFFFFF;--ink:#16181A;--fg2:#4A4E54;--muted:#7A7F85;--faint:#B9BCC1;
+:root{--ground:#FCFCFB;--ink:#16181A;--fg2:#4A4E54;--muted:#7A7F85;--faint:#B9BCC1;
       --line:#E9EAEC;--line2:#F2F3F4;--accent:#D9480F;}
 [data-testid="stHeader"],#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stStatusWidget"],[data-testid="stDecoration"]{visibility:hidden;height:0;display:none;}
 .stApp,[data-testid="stAppViewContainer"],[data-testid="stSidebar"]{background:var(--ground);}
@@ -25,11 +25,11 @@ button[data-baseweb="tab"]{font-family:ui-monospace,"SF Mono",Menlo,monospace!im
 [data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{background:var(--ink)!important;}
 .stButton>button,button[kind="secondary"]{border:1px solid var(--line)!important;border-radius:6px!important;color:var(--ink)!important;background:#fff!important;font-family:ui-monospace,Menlo,monospace!important;font-size:.72rem!important;letter-spacing:.04em;}
 [data-testid="stMetricValue"]{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif!important;color:var(--ink)!important;font-weight:650!important;}
-a{color:var(--accent)!important;text-decoration:none;}
+a{color:var(--ink)!important;text-decoration:none;border-bottom:1px solid var(--line);}
 .janus-eyebrow{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.68rem;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);margin:0 0 8px;}
 .janus-title{font-family:-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif;font-size:2.3rem;font-weight:700;letter-spacing:-.02em;color:var(--ink);margin:0 0 8px;line-height:1.04;}
 .janus-dek{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;font-size:1rem;color:var(--fg2);margin:0;max-width:66ch;line-height:1.55;}
-.janus-dek .sig{color:var(--accent);}
+.janus-dek .sig{color:var(--ink);font-weight:600;}
 .janus-rule{height:1px;background:var(--line);margin:16px 0 4px;}
 /* raw data card */
 .jx-card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:18px 20px;}

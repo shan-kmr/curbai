@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <link href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css" rel="stylesheet"/>
 <style>
-  html,body{margin:0;padding:0;background:#FFFFFF;overflow:hidden;}
+  html,body{margin:0;padding:0;background:#FCFCFB;overflow:hidden;}
   #map{position:absolute;inset:0;}
   #hud{position:absolute;left:10px;bottom:10px;z-index:9;
        font:600 10px/1.4 ui-monospace,Menlo,monospace;letter-spacing:.08em;
@@ -15,7 +15,7 @@
        font:12px/1.45 ui-monospace,Menlo,monospace;color:#16181A;
        background:#FFFFFF;border:1px solid #E9EAEC;border-radius:4px;
        padding:7px 10px;max-width:240px;box-shadow:0 2px 8px rgba(26,24,21,.08);}
-  #tip b{color:#D9480F;}
+  #tip b{color:#16181A;}
   .maplibregl-ctrl-attrib{font:10px/1.3 ui-monospace,Menlo,monospace!important;
        background:rgba(255,255,255,.7)!important;}
 </style>
@@ -60,7 +60,7 @@ window.onerror=(m,src,l)=>{hud.textContent=("ERR "+m+" @"+l).slice(0,160); hud.s
 function activeRes(z){ let r=5; for(const[res,mz] of LADDER) if(z>=mz) r=res; return r; }
 function saveView(){ try{ sessionStorage.setItem("jm_view_nyc3", JSON.stringify(view)); }catch(e){} }
 function hudUpdate(){ const n=(args&&args.live&&args.live.buses)?args.live.buses.length:0;
-  hud.textContent="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":"")+(n?(" · "+n+" live"):""); }
+  hud.innerHTML="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":"")+(n?(" · <span style=\"color:#D9480F\">"+n+" live</span>"):""); }
 
 /* ---------- ingest ---------- */
 function ingest(a){
