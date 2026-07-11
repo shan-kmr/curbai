@@ -634,6 +634,11 @@ if scope == US:
     # ---- the tiled map: one continuous res-5 → res-9 ladder ----
     from curbai.janusmap import janusmap  # noqa: E402
 
+    # real NYC footprints (Plate II) — set after the public tiles upload
+    BUILDINGS_URL = os.environ.get(
+        "JANUS_BUILDINGS_URL",
+        "https://huggingface.co/datasets/skay97/curbai-tiles/resolve/main/nyc_buildings.pmtiles")
+
     LODF = {6: DATADIR / "us_lod" / "r6.parquet",
             7: DATADIR / "us_lod" / "r7.parquet",
             8: DATADIR / "us_lod" / "r8.parquet"}
@@ -711,7 +716,7 @@ if scope == US:
             r5=r5_payload(col),
             chunks=st.session_state["jm_chunks"],
             layer={"col": col, "label": unit, "vmax": (lod_vmax(col) if col else {})},
-            focus=focus, height=580, key="jm_map")
+            focus=focus, buildings_url=BUILDINGS_URL, height=580, key="jm_map")
         if ev and ev.get("nonce") != st.session_state.get("jm_nonce"):
             st.session_state["jm_nonce"] = ev.get("nonce")
             if ev.get("t") == "need":

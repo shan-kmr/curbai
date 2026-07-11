@@ -20,6 +20,7 @@
        background:rgba(255,255,255,.7)!important;}
 </style>
 <script crossorigin="anonymous" src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
 <script crossorigin="anonymous" src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
 <script crossorigin="anonymous" src="https://unpkg.com/deck.gl@9.3.6/dist.min.js"></script>
 <script crossorigin="anonymous" src="https://unpkg.com/@deck.gl/mapbox@9.3.6/dist.min.js"></script>
@@ -165,7 +166,7 @@ function buildLayers(){
   const z=view.zoom, res=activeRes(z), layers=[];
   const order=[5,6,7,8,9].filter(r=>r<=res && store[String(r)] && store[String(r)].size);
   for(const r of order) layers.push(hexLayer(r, store[String(r)], r===res || (r===Math.max(...order)&&r<res)));
-  if(z>=BUILDING_ZOOM && store["9"]){
+  if(z>=BUILDING_ZOOM && store["9"] && !window.__realBldg){
     layers.push(new deck.SolidPolygonLayer({
       id:"bldg", data:buildingsFor(store["9"]),
       getPolygon:d=>d.polygon, extruded:true, getElevation:d=>d.h,
@@ -230,6 +231,21 @@ function boot(){
   map.on("error", e=>{ if(e&&e.error){hud.textContent=("MAP "+e.error.message).slice(0,160); hud.style.color="#B04A3A";} });
   map.on("load", ()=>{
     if(!deck || !deck.MapboxOverlay){ hud.textContent="ERR deck.MapboxOverlay missing (bundle)"; hud.style.color="#B04A3A"; return; }
+    if(args && args.buildings_url && window.pmtiles){
+      try{
+        const proto=new pmtiles.Protocol();
+        maplibregl.addProtocol("pmtiles", proto.tile);
+        map.addSource("bldg", {type:"vector", url:"pmtiles://"+args.buildings_url});
+        const firstSymbol=(map.getStyle().layers.find(l=>l.type==="symbol")||{}).id;
+        map.addLayer({id:"bldg3d", source:"bldg", "source-layer":"buildings",
+          type:"fill-extrusion", minzoom:13.4,
+          paint:{"fill-extrusion-color":"#F1F0ED",
+                 "fill-extrusion-height":["get","h"],
+                 "fill-extrusion-base":0,
+                 "fill-extrusion-opacity":0.96}}, firstSymbol);
+        window.__realBldg=true;
+      }catch(e){ hud.textContent=("BLDG "+e.message).slice(0,160); }
+    }
     overlay=new deck.MapboxOverlay({interleaved:true, layers:[],
       onClick:onClick, onHover:onHover,
       getCursor:({isHovering})=>isHovering?"pointer":"grab"});
