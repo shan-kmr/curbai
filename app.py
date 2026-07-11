@@ -629,7 +629,7 @@ st.markdown(
     'letter-spacing:.14em;text-transform:uppercase;color:#7A7F85;">Atlas · New York</span>'
     '<span style="margin-left:auto;font-family:ui-monospace,Menlo,monospace;'
     'font-size:.62rem;letter-spacing:.08em;">'
-    '<a href="https://shan-kmr.github.io/janus-site/" target="_blank" '
+    '<a href="https://shan-kmr.github.io/geo-landing/" target="_blank" '
     'style="color:#7A7F85!important;margin-right:12px;">janus ↗</a>'
     '<a href="https://github.com/shan-kmr/curbai" target="_blank" '
     'style="color:#7A7F85!important;">code ↗</a></span></div>'
