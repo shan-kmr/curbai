@@ -52,14 +52,15 @@ function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCode
 /* ---------- state ---------- */
 let map=null, overlay=null, args=null, mapReady=false, pendingArgs=null;
 let store={}, centers=[], requested=new Set();
-let view={latitude:40.733, longitude:-73.99, zoom:11.9, pitch:48, bearing:-12};
+let view={latitude:40.748, longitude:-73.985, zoom:11.9, pitch:48, bearing:-12};
 let needTimer=null;
 const tip=document.getElementById("tip"), hud=document.getElementById("hud");
 window.onerror=(m,src,l)=>{hud.textContent=("ERR "+m+" @"+l).slice(0,160); hud.style.color="#B04A3A";};
 
 function activeRes(z){ let r=5; for(const[res,mz] of LADDER) if(z>=mz) r=res; return r; }
-function saveView(){ try{ sessionStorage.setItem("jm_view_nyc2", JSON.stringify(view)); }catch(e){} }
-function hudUpdate(){ hud.textContent="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":""); }
+function saveView(){ try{ sessionStorage.setItem("jm_view_nyc3", JSON.stringify(view)); }catch(e){} }
+function hudUpdate(){ const n=(args&&args.live&&args.live.buses)?args.live.buses.length:0;
+  hud.textContent="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":"")+(n?(" · "+n+" live"):""); }
 
 /* ---------- ingest ---------- */
 function ingest(a){
@@ -145,7 +146,7 @@ function hexLayer(res, rows, isTop){
   const vmax = args && args.layer && args.layer.vmax ? (args.layer.vmax[String(res)]||1) : 1;
   const data=[...rows.entries()].map(([id,r])=>({id, v:r.v}));
   return new deck.H3HexagonLayer({
-    id:"hex-r"+res, data,
+    id:"hex-r"+res, data, beforeId:window.__beforeId,
     getHexagon:d=>d.id,
     filled:true, extruded:false, stroked:true, coverage:0.985,
     getFillColor:d=>{
@@ -175,8 +176,32 @@ function buildLayers(){
       transitions:{getElevation:{duration:550, enter:()=>[0]}},
     }));
   }
+  if(args && args.live){
+    const L=args.live;
+    if(L.buses && L.buses.length){
+      layers.push(new deck.ScatterplotLayer({
+        id:"live-bus", beforeId:window.__beforeId,
+        data:[...L.buses].sort((a,b)=>(String(a[3])>String(b[3])?1:-1)),
+        getPosition:d=>[d[0],d[1]], getRadius:16,
+        radiusMinPixels:2.2, radiusMaxPixels:5,
+        getFillColor:[22,24,26,205], stroked:false, pickable:false,
+        transitions:{getPosition:{duration:18000, easing:t=>t}},
+        updateTriggers:{getPosition:[L.ts]},
+      }));
+    }
+    if(L.bikes && L.bikes.length){
+      layers.push(new deck.ScatterplotLayer({
+        id:"live-bike", beforeId:window.__beforeId,
+        data:L.bikes, getPosition:d=>[d[0],d[1]],
+        getRadius:d=>6+d[2]*15, radiusMinPixels:1.2, radiusMaxPixels:4,
+        getFillColor:d=>[122,127,133, 70+d[2]*100], stroked:false, pickable:false,
+        transitions:{getRadius:800, getFillColor:800},
+        updateTriggers:{getRadius:[L.ts], getFillColor:[L.ts]},
+      }));
+    }
+  }
   if(args && args.focus && store["9"] && store["9"].has(args.focus)){
-    layers.push(new deck.H3HexagonLayer({id:"focus", data:[{id:args.focus}],
+    layers.push(new deck.H3HexagonLayer({id:"focus", beforeId:window.__beforeId, data:[{id:args.focus}],
       getHexagon:d=>d.id, filled:true, stroked:true, extruded:false,
       getFillColor:[217,72,15,18], getLineColor:[217,72,15,215],
       lineWidthMinPixels:2, pickable:false}));
@@ -208,10 +233,10 @@ function onHover(info){
 
 /* ---------- boot ---------- */
 function boot(){
-  try{ const sv=sessionStorage.getItem("jm_view_nyc2");
+  try{ const sv=sessionStorage.getItem("jm_view_nyc3");
        if(sv) view={...view, ...JSON.parse(sv)}; }catch(e){}
   const v0=(window.__DBG_ARGS&&window.__DBG_ARGS.view0)||(args&&args.view0);
-  if(v0 && !sessionStorage.getItem("jm_view_nyc2")) view={...view, ...v0};
+  if(v0 && !sessionStorage.getItem("jm_view_nyc3")) view={...view, ...v0};
 
   map=new maplibregl.Map({
     container:"map", style:"./basemap-style.json",
@@ -231,18 +256,19 @@ function boot(){
   map.on("error", e=>{ if(e&&e.error){hud.textContent=("MAP "+e.error.message).slice(0,160); hud.style.color="#B04A3A";} });
   map.on("load", ()=>{
     if(!deck || !deck.MapboxOverlay){ hud.textContent="ERR deck.MapboxOverlay missing (bundle)"; hud.style.color="#B04A3A"; return; }
+    window.__beforeId=(map.getStyle().layers.find(l=>l.type==="symbol")||{}).id;
     if(args && args.buildings_url && window.pmtiles){
       try{
         const proto=new pmtiles.Protocol();
         maplibregl.addProtocol("pmtiles", proto.tile);
         map.addSource("bldg", {type:"vector", url:"pmtiles://"+args.buildings_url});
-        const firstSymbol=(map.getStyle().layers.find(l=>l.type==="symbol")||{}).id;
+        const firstSymbol=window.__beforeId;
         map.addLayer({id:"bldg3d", source:"bldg", "source-layer":"buildings",
           type:"fill-extrusion", minzoom:13.4,
           paint:{"fill-extrusion-color":"#F1F0ED",
                  "fill-extrusion-height":["get","h"],
                  "fill-extrusion-base":0,
-                 "fill-extrusion-opacity":0.96}}, firstSymbol);
+                 "fill-extrusion-opacity":0.8}}, firstSymbol);
         window.__realBldg=true;
       }catch(e){ hud.textContent=("BLDG "+e.message).slice(0,160); }
     }

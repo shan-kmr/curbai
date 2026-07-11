@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import duckdb
@@ -693,6 +694,43 @@ if scope == US:
             out["mh"] = d.max_height.fillna(0).round(0).tolist()
         return out
 
+    @st.cache_data(ttl=18, show_spinner=False)
+    def live_buses() -> list:
+        try:
+            import requests as rq
+            from google.transit import gtfs_realtime_pb2
+            r = rq.get("https://gtfsrt.prod.obanyc.com/vehiclePositions", timeout=8)
+            f = gtfs_realtime_pb2.FeedMessage(); f.ParseFromString(r.content)
+            out = []
+            for e in f.entity:
+                v = e.vehicle
+                if (v.position.latitude and 40.45 < v.position.latitude < 41.0
+                        and -74.35 < v.position.longitude < -73.6):
+                    out.append([round(v.position.longitude, 5), round(v.position.latitude, 5),
+                                int(v.position.bearing or 0), v.vehicle.id or e.id])
+            return out
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=55, show_spinner=False)
+    def live_bikes() -> list:
+        try:
+            import requests as rq
+            info = rq.get("https://gbfs.citibikenyc.com/gbfs/en/station_information.json", timeout=8).json()["data"]["stations"]
+            stat = rq.get("https://gbfs.citibikenyc.com/gbfs/en/station_status.json", timeout=8).json()["data"]["stations"]
+            cap = {s["station_id"]: (s["lat"], s["lon"], max(1, s.get("capacity", 1))) for s in info}
+            out = []
+            for s_ in stat:
+                c = cap.get(s_["station_id"])
+                if not c:
+                    continue
+                la, lo, capn = c
+                out.append([round(lo, 5), round(la, 5),
+                            round(min(1.0, s_.get("num_bikes_available", 0) / capn), 2)])
+            return out
+        except Exception:
+            return []
+
     layer_name = st.selectbox("Shade the tiles by", list(TILE_LAYERS), index=0, key="jm_layer")
     col, unit = TILE_LAYERS[layer_name]
 
@@ -712,25 +750,30 @@ if scope == US:
 
     left, right = st.columns([2, 1], gap="large")
     with left:
-        ev = janusmap(
-            r5=r5_payload(col),
-            chunks=st.session_state["jm_chunks"],
-            layer={"col": col, "label": unit, "vmax": (lod_vmax(col) if col else {})},
-            focus=focus, buildings_url=BUILDINGS_URL, height=580, key="jm_map")
-        if ev and ev.get("nonce") != st.session_state.get("jm_nonce"):
-            st.session_state["jm_nonce"] = ev.get("nonce")
-            if ev.get("t") == "need":
-                res = str(ev["res"])
-                parents = st.session_state["jm_parents"].setdefault(res, set())
-                chunks = st.session_state["jm_chunks"].setdefault(res, {})
-                for p in ev.get("parents", []):
-                    if p not in parents:
-                        parents.add(p)
-                        chunks[p] = fetch_chunk(int(res), p, col)
-                st.rerun()
-            elif ev.get("t") == "select":
-                st.session_state["us_focus9"] = ev.get("h3")
-                st.rerun()
+        @st.fragment(run_every=20)
+        def map_fragment():
+            live = {"buses": live_buses(), "bikes": live_bikes(), "ts": int(time.time())}
+            ev = janusmap(
+                r5=r5_payload(col),
+                chunks=st.session_state["jm_chunks"],
+                layer={"col": col, "label": unit, "vmax": (lod_vmax(col) if col else {})},
+                focus=st.session_state.get("us_focus9"),
+                buildings_url=BUILDINGS_URL, live=live, height=580, key="jm_map")
+            if ev and ev.get("nonce") != st.session_state.get("jm_nonce"):
+                st.session_state["jm_nonce"] = ev.get("nonce")
+                if ev.get("t") == "need":
+                    res = str(ev["res"])
+                    parents = st.session_state["jm_parents"].setdefault(res, set())
+                    chunks = st.session_state["jm_chunks"].setdefault(res, {})
+                    for p in ev.get("parents", []):
+                        if p not in parents:
+                            parents.add(p)
+                            chunks[p] = fetch_chunk(int(res), p, col)
+                    st.rerun()
+                elif ev.get("t") == "select":
+                    st.session_state["us_focus9"] = ev.get("h3")
+                    st.rerun()
+        map_fragment()
     with right:
         if focus:
             kids = load_us_children(h3.h3_to_parent(focus, 5))

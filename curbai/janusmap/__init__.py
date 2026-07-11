@@ -16,7 +16,7 @@ _frontend = Path(__file__).parent / "frontend"
 _component = components.declare_component("janusmap", path=str(_frontend))
 
 
-def janusmap(*, r5, chunks, layer, focus=None, buildings_url=None, height=580, key="janusmap"):
+def janusmap(*, r5, chunks, layer, focus=None, buildings_url=None, live=None, height=580, key="janusmap"):
     """Render the tiled map.
 
     r5      columnar dict for the national res-5 grid:
@@ -29,4 +29,4 @@ def janusmap(*, r5, chunks, layer, focus=None, buildings_url=None, height=580, k
             {t:'need', res:int, parents:[res5,...]} | {t:'select', h3} | None
     """
     return _component(r5=r5, chunks=chunks, layer=layer, focus=focus,
-                      buildings_url=buildings_url, height=height, key=key, default=None)
+                      buildings_url=buildings_url, live=live, height=height, key=key, default=None)
