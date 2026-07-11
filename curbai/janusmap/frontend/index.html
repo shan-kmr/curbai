@@ -51,13 +51,13 @@ function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCode
 /* ---------- state ---------- */
 let map=null, overlay=null, args=null, mapReady=false, pendingArgs=null;
 let store={}, centers=[], requested=new Set();
-let view={latitude:40.72, longitude:-73.99, zoom:10.6, pitch:45, bearing:-12};
+let view={latitude:40.733, longitude:-73.99, zoom:11.9, pitch:48, bearing:-12};
 let needTimer=null;
 const tip=document.getElementById("tip"), hud=document.getElementById("hud");
 window.onerror=(m,src,l)=>{hud.textContent=("ERR "+m+" @"+l).slice(0,160); hud.style.color="#B04A3A";};
 
 function activeRes(z){ let r=5; for(const[res,mz] of LADDER) if(z>=mz) r=res; return r; }
-function saveView(){ try{ sessionStorage.setItem("jm_view_nyc", JSON.stringify(view)); }catch(e){} }
+function saveView(){ try{ sessionStorage.setItem("jm_view_nyc2", JSON.stringify(view)); }catch(e){} }
 function hudUpdate(){ hud.textContent="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":""); }
 
 /* ---------- ingest ---------- */
@@ -88,6 +88,7 @@ function ingest(a){
     }
   }
   redraw();
+  maybeNeed();
 }
 
 /* ---------- viewport -> parents ---------- */
@@ -186,9 +187,12 @@ function redraw(){ if(overlay) overlay.setProps({layers: buildLayers()}); }
 /* ---------- interactions ---------- */
 function onClick(info){
   if(!info || !info.object || !info.object.id) return;
-  const id=info.object.id, res=activeRes(view.zoom);
-  if(res>=9){ setValue({t:"select", h3:id, nonce:Date.now()}); redraw(); return; }
-  const next=LADDER.find(([r])=>r===Math.min(res+1,9));
+  const id=info.object.id;
+  const lid=(info.layer&&info.layer.id)||"";
+  const m=lid.match(/^hex-r(\d)/);
+  const pickedRes=m?parseInt(m[1]):activeRes(view.zoom);
+  if(pickedRes>=9){ setValue({t:"select", h3:id, nonce:Date.now()}); redraw(); return; }
+  const next=LADDER.find(([r])=>r===Math.min(pickedRes+1,9));
   const c=h3.h3ToGeo(id); if(!c) return;
   map.flyTo({center:[c[1],c[0]], zoom:(next?next[1]:11)+0.55, duration:950, essential:true});
 }
@@ -203,10 +207,10 @@ function onHover(info){
 
 /* ---------- boot ---------- */
 function boot(){
-  try{ const sv=sessionStorage.getItem("jm_view_nyc");
+  try{ const sv=sessionStorage.getItem("jm_view_nyc2");
        if(sv) view={...view, ...JSON.parse(sv)}; }catch(e){}
   const v0=(window.__DBG_ARGS&&window.__DBG_ARGS.view0)||(args&&args.view0);
-  if(v0 && !sessionStorage.getItem("jm_view_nyc")) view={...view, ...v0};
+  if(v0 && !sessionStorage.getItem("jm_view_nyc2")) view={...view, ...v0};
 
   map=new maplibregl.Map({
     container:"map", style:"./basemap-style.json",
