@@ -19,9 +19,10 @@
   .maplibregl-ctrl-attrib{font:10px/1.3 ui-monospace,Menlo,monospace!important;
        background:rgba(255,255,255,.7)!important;}
 </style>
-<script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
-<script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
-<script src="https://unpkg.com/deck.gl@9.4/dist.min.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/deck.gl@9.3.6/dist.min.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/@deck.gl/mapbox@9.3.6/dist.min.js"></script>
 </head>
 <body>
 <div id="map"></div>
@@ -50,13 +51,13 @@ function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCode
 /* ---------- state ---------- */
 let map=null, overlay=null, args=null, mapReady=false, pendingArgs=null;
 let store={}, centers=[], requested=new Set();
-let view={latitude:39.5, longitude:-98.0, zoom:3.4, pitch:38, bearing:-12};
+let view={latitude:40.72, longitude:-73.99, zoom:10.6, pitch:45, bearing:-12};
 let needTimer=null;
 const tip=document.getElementById("tip"), hud=document.getElementById("hud");
 window.onerror=(m,src,l)=>{hud.textContent=("ERR "+m+" @"+l).slice(0,160); hud.style.color="#B04A3A";};
 
 function activeRes(z){ let r=5; for(const[res,mz] of LADDER) if(z>=mz) r=res; return r; }
-function saveView(){ try{ sessionStorage.setItem("jm_view", JSON.stringify(view)); }catch(e){} }
+function saveView(){ try{ sessionStorage.setItem("jm_view_nyc", JSON.stringify(view)); }catch(e){} }
 function hudUpdate(){ hud.textContent="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":""); }
 
 /* ---------- ingest ---------- */
@@ -202,16 +203,17 @@ function onHover(info){
 
 /* ---------- boot ---------- */
 function boot(){
-  try{ const sv=sessionStorage.getItem("jm_view");
+  try{ const sv=sessionStorage.getItem("jm_view_nyc");
        if(sv) view={...view, ...JSON.parse(sv)}; }catch(e){}
   const v0=(window.__DBG_ARGS&&window.__DBG_ARGS.view0)||(args&&args.view0);
-  if(v0 && !sessionStorage.getItem("jm_view")) view={...view, ...v0};
+  if(v0 && !sessionStorage.getItem("jm_view_nyc")) view={...view, ...v0};
 
   map=new maplibregl.Map({
     container:"map", style:"./basemap-style.json",
     center:[view.longitude, view.latitude], zoom:view.zoom,
     pitch:view.pitch, bearing:view.bearing,
-    minZoom:3, maxZoom:17.4, maxPitch:62,
+    minZoom:8.6, maxZoom:17.4, maxPitch:62,
+    maxBounds:[[-74.32,40.46],[-73.62,40.98]],
     attributionControl:{compact:true}, antialias:true,
   });
   map.on("move", ()=>{
@@ -223,6 +225,7 @@ function boot(){
   map.on("moveend", maybeNeed);
   map.on("error", e=>{ if(e&&e.error){hud.textContent=("MAP "+e.error.message).slice(0,160); hud.style.color="#B04A3A";} });
   map.on("load", ()=>{
+    if(!deck || !deck.MapboxOverlay){ hud.textContent="ERR deck.MapboxOverlay missing (bundle)"; hud.style.color="#B04A3A"; return; }
     overlay=new deck.MapboxOverlay({interleaved:true, layers:[],
       onClick:onClick, onHover:onHover,
       getCursor:({isHovering})=>isHovering?"pointer":"grab"});

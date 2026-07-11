@@ -32,7 +32,7 @@ ui.inject()
 
 DATADIR = Path(__file__).resolve().parents[1] / "data"
 DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-US = "United States"
+US = "New York · tiled"
 
 # label -> (slug, lat, lon, zoom)
 CITIES = {
@@ -650,6 +650,8 @@ if scope == US:
     @st.cache_data(show_spinner=False)
     def r5_payload(col: str | None) -> dict:
         df = pd.read_parquet(US_R5)
+        # NYC focus (temporary): only regional res-5 parents ship to the client
+        df = df[(df.center_lat.between(40.35, 41.10)) & (df.center_lon.between(-74.50, -73.45))]
         out = {"h3": df.h3_index.tolist(),
                "lat": df.center_lat.round(4).tolist(),
                "lon": df.center_lon.round(4).tolist(), "val": None}
@@ -699,7 +701,7 @@ if scope == US:
     st.session_state.setdefault("jm_chunks", {})
 
     focus = st.session_state.get("us_focus9")
-    st.caption("United States · zoom to split the tiles (res 5 → 9) · click a tile to dive, "
+    st.caption("New York · zoom to split the tiles (res 5 → 9) · click a tile to dive, "
                "click a street-level cell for its card · buildings appear up close"
                + (f" · shaded by {layer_name.lower()}" if col else ""))
 
