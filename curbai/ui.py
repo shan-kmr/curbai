@@ -1,45 +1,53 @@
-"""Shared Janus house style + helpers for CurbIndex and the Hex Atlas."""
+"""Shared Janus house style + helpers — Graphite & Signal edition.
+
+Premium white, near-black ink, gray structure, one signal-orange accent
+used sparingly (links, selection, key numbers — never large fills).
+Grotesk everything; mono for data. (2026-07-10 retheme: the old
+paper/cobalt/serif look was retired as reading AI-designed.)
+"""
 
 from __future__ import annotations
 
 import streamlit as st
 
 BRAND_CSS = """<style>
-:root{--paper:#F6F4EF;--ink:#1A1815;--cobalt:#1E3A8A;--muted:#8C887E;--line:#E0DDD4;--fg2:#4E4B45;}
+:root{--ground:#FFFFFF;--ink:#16181A;--fg2:#4A4E54;--muted:#7A7F85;--faint:#B9BCC1;
+      --line:#E9EAEC;--line2:#F2F3F4;--accent:#D9480F;}
 [data-testid="stHeader"],#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stStatusWidget"],[data-testid="stDecoration"]{visibility:hidden;height:0;display:none;}
-.stApp,[data-testid="stAppViewContainer"],[data-testid="stSidebar"]{background:var(--paper);}
+.stApp,[data-testid="stAppViewContainer"],[data-testid="stSidebar"]{background:var(--ground);}
 html,body,[data-testid="stAppViewContainer"] *{color:var(--ink);}
-.block-container{padding-top:2.4rem;max-width:1180px;}
-h1,h2,h3,h4{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif!important;letter-spacing:-.01em;color:var(--ink)!important;}
+.block-container{padding-top:2.2rem;max-width:1180px;}
+h1,h2,h3,h4{font-family:-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif!important;
+  letter-spacing:-.015em;color:var(--ink)!important;font-weight:650!important;}
 [data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] *{font-family:ui-monospace,"SF Mono",Menlo,monospace!important;color:var(--muted)!important;letter-spacing:.02em;}
 [data-baseweb="tab-list"]{gap:2px;border-bottom:1px solid var(--line);}
 button[data-baseweb="tab"]{font-family:ui-monospace,"SF Mono",Menlo,monospace!important;letter-spacing:.06em;text-transform:uppercase;font-size:.7rem!important;}
-[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{background:var(--cobalt)!important;}
-.stButton>button,button[kind="secondary"]{border:1px solid var(--line)!important;border-radius:4px!important;color:var(--ink)!important;background:#fff!important;font-family:ui-monospace,Menlo,monospace!important;font-size:.72rem!important;letter-spacing:.04em;}
-[data-testid="stMetricValue"]{font-family:"Iowan Old Style",Palatino,Georgia,serif!important;color:var(--cobalt)!important;}
-a{color:var(--cobalt)!important;}
-.janus-eyebrow{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.7rem;letter-spacing:.22em;text-transform:uppercase;color:var(--cobalt);margin:0 0 6px;}
-.janus-title{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:2.5rem;font-weight:600;letter-spacing:-.015em;color:var(--ink);margin:0 0 8px;line-height:1.03;}
-.janus-dek{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:1.04rem;color:var(--fg2);margin:0;max-width:66ch;line-height:1.5;}
-.janus-dek .sig{color:var(--cobalt);font-style:italic;}
+[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{background:var(--ink)!important;}
+.stButton>button,button[kind="secondary"]{border:1px solid var(--line)!important;border-radius:6px!important;color:var(--ink)!important;background:#fff!important;font-family:ui-monospace,Menlo,monospace!important;font-size:.72rem!important;letter-spacing:.04em;}
+[data-testid="stMetricValue"]{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif!important;color:var(--ink)!important;font-weight:650!important;}
+a{color:var(--accent)!important;text-decoration:none;}
+.janus-eyebrow{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.68rem;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);margin:0 0 8px;}
+.janus-title{font-family:-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif;font-size:2.3rem;font-weight:700;letter-spacing:-.02em;color:var(--ink);margin:0 0 8px;line-height:1.04;}
+.janus-dek{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;font-size:1rem;color:var(--fg2);margin:0;max-width:66ch;line-height:1.55;}
+.janus-dek .sig{color:var(--accent);}
 .janus-rule{height:1px;background:var(--line);margin:16px 0 4px;}
 /* raw data card */
-.jx-card{border:1px solid var(--line);border-radius:6px;background:#fff;padding:18px 20px;}
-.jx-cid{font-family:ui-monospace,Menlo,monospace;font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--cobalt);}
-.jx-big{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:2.6rem;font-weight:600;line-height:1;margin:4px 0 2px;color:var(--ink);}
-.jx-big small{font-size:.9rem;color:var(--muted);font-family:ui-monospace,Menlo,monospace;letter-spacing:.04em;}
-.jx-row{display:flex;justify-content:space-between;gap:12px;font-size:.9rem;padding:5px 0;border-top:1px solid var(--line);}
+.jx-card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:18px 20px;}
+.jx-cid{font-family:ui-monospace,Menlo,monospace;font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}
+.jx-big{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;font-size:2.4rem;font-weight:700;line-height:1;margin:4px 0 2px;color:var(--ink);letter-spacing:-.02em;}
+.jx-big small{font-size:.85rem;color:var(--muted);font-family:ui-monospace,Menlo,monospace;letter-spacing:.04em;font-weight:400;}
+.jx-row{display:flex;justify-content:space-between;gap:12px;font-size:.9rem;padding:5px 0;border-top:1px solid var(--line2);}
 .jx-row .k{color:var(--fg2);} .jx-row .v{font-family:ui-monospace,Menlo,monospace;font-size:.8rem;text-align:right;}
-.jx-row .v b{color:var(--cobalt);font-weight:600;}
+.jx-row .v b{color:var(--ink);font-weight:650;}
 .jx-lab{font-family:ui-monospace,Menlo,monospace;font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:14px 0 6px;}
 .jx-hist{display:flex;align-items:flex-end;gap:2px;height:46px;}
-.jx-hist .b{flex:1;background:var(--cobalt);border-radius:1px 1px 0 0;min-height:1px;opacity:.85;}
+.jx-hist .b{flex:1;background:var(--ink);border-radius:1px 1px 0 0;min-height:1px;opacity:.78;}
 .jx-hticks{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;font-size:.55rem;color:var(--faint);margin-top:3px;}
 .jx-fac{font-size:.86rem;padding:3px 0;display:flex;justify-content:space-between;}
 .jx-fac .c{font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:var(--muted);}
-.jx-txt{font-family:"Iowan Old Style",Palatino,Georgia,serif;font-size:.86rem;color:var(--fg2);line-height:1.46;font-style:italic;margin-top:4px;}
+.jx-txt{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;font-size:.86rem;color:var(--fg2);line-height:1.5;margin-top:4px;}
 .jx-sec{margin-top:15px;}
-/* card entrance — card rises in, sections stagger, bars grow from baseline */
+/* card entrance — kept from v1 */
 @keyframes jxIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
 @keyframes jxPop{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:scale(1)}}
 @keyframes jxBar{from{transform:scaleY(0)}to{transform:scaleY(1)}}
@@ -72,14 +80,13 @@ def header(eyebrow: str, title: str, dek: str) -> None:
 
 
 def count_color(t: float) -> list[int]:
-    """Paper→cobalt ramp for a normalised raw count (t in 0..1). Not a score — a
-    visual encoding of the raw number. Alpha rises with the count."""
+    """White→graphite density ramp for a normalised raw count (t in 0..1).
+    Data as ink density — the accent never fills."""
     t = max(0.0, min(1.0, float(t)))
-    stops = [(0.0, (223, 221, 212)), (0.35, (170, 182, 205)),
-             (0.70, (70, 105, 180)), (1.0, (30, 58, 138))]
-    alpha = int(70 + t * 165)
+    stops = [(0.0, (233, 234, 236)), (0.5, (158, 162, 168)), (1.0, (42, 45, 49))]
+    alpha = int(60 + t * 160)
     for (t0, c0), (t1, c1) in zip(stops[:-1], stops[1:]):
         if t0 <= t <= t1:
             f = (t - t0) / (t1 - t0 + 1e-9)
             return [int(c0[i] + f * (c1[i] - c0[i])) for i in range(3)] + [alpha]
-    return [30, 58, 138, 235]
+    return [42, 45, 49, 220]
