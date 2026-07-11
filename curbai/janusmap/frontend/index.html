@@ -1,0 +1,296 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<link href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css" rel="stylesheet"/>
+<style>
+  html,body{margin:0;padding:0;background:#FCFCFB;overflow:hidden;}
+  #map{position:absolute;inset:0;}
+  #hud{position:absolute;left:10px;bottom:10px;z-index:9;
+       font:600 10px/1.4 ui-monospace,Menlo,monospace;letter-spacing:.08em;
+       color:#7A7F85;background:rgba(255,255,255,.88);padding:4px 8px;
+       border:1px solid #E9EAEC;border-radius:4px;pointer-events:none;
+       text-transform:uppercase;}
+  #tip{position:absolute;z-index:10;pointer-events:none;display:none;
+       font:12px/1.45 ui-monospace,Menlo,monospace;color:#16181A;
+       background:#FFFFFF;border:1px solid #E9EAEC;border-radius:4px;
+       padding:7px 10px;max-width:240px;box-shadow:0 2px 8px rgba(26,24,21,.08);}
+  #tip b{color:#16181A;}
+  .maplibregl-ctrl-attrib{font:10px/1.3 ui-monospace,Menlo,monospace!important;
+       background:rgba(255,255,255,.7)!important;}
+</style>
+<script crossorigin="anonymous" src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/deck.gl@9.3.6/dist.min.js"></script>
+<script crossorigin="anonymous" src="https://unpkg.com/@deck.gl/mapbox@9.3.6/dist.min.js"></script>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">res 5</div>
+<div id="tip"></div>
+<script>
+/* ---------- Streamlit component protocol (hand-rolled) ---------- */
+function toStreamlit(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type}, data), "*"); }
+function setValue(v){ toStreamlit("streamlit:setComponentValue", {value:v, dataType:"json"}); }
+
+/* ---------- constants ---------- */
+const LINE=[122,127,133];                                  /* neutral gray hairlines */
+const LADDER=[[5,0],[6,5.8],[7,7.3],[8,8.8],[9,10.3]];
+const BUILDING_ZOOM=14.2;
+const RAMP=[[0.0,[233,234,236]],[0.5,[158,162,168]],[1.0,[42,45,49]]];   /* ink density, no hue */
+function ramp(t){ t=Math.max(0,Math.min(1,t));
+  for(let i=0;i<RAMP.length-1;i++){const[a,ca]=RAMP[i],[b,cb]=RAMP[i+1];
+    if(t>=a&&t<=b){const f=(t-a)/(b-a+1e-9);
+      return [0,1,2].map(k=>ca[k]+f*(cb[k]-ca[k]));}}
+  return RAMP[RAMP.length-1][1]; }
+function mulberry32(seed){ return function(){ let t=seed+=0x6D2B79F5;
+  t=Math.imul(t^t>>>15,t|1); t^=t+Math.imul(t^t>>>7,t|61);
+  return ((t^t>>>14)>>>0)/4294967296; }; }
+function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);} return h>>>0; }
+
+/* ---------- state ---------- */
+let map=null, overlay=null, args=null, mapReady=false, pendingArgs=null;
+let store={}, centers=[], requested=new Set();
+let view={latitude:40.748, longitude:-73.985, zoom:11.9, pitch:48, bearing:-12};
+let needTimer=null;
+const tip=document.getElementById("tip"), hud=document.getElementById("hud");
+window.onerror=(m,src,l)=>{hud.textContent=("ERR "+m+" @"+l).slice(0,160); hud.style.color="#B04A3A";};
+
+function activeRes(z){ let r=5; for(const[res,mz] of LADDER) if(z>=mz) r=res; return r; }
+function saveView(){ try{ sessionStorage.setItem("jm_view_nyc3", JSON.stringify(view)); }catch(e){} }
+function hudUpdate(){ const n=(args&&args.live&&args.live.buses)?args.live.buses.length:0;
+  hud.innerHTML="res "+activeRes(view.zoom)+(view.zoom>=BUILDING_ZOOM?" · buildings":"")+(n?(" · <span style=\"color:#D9480F\">"+n+" live</span>"):""); }
+
+/* ---------- ingest ---------- */
+function ingest(a){
+  args=a;
+  if(!mapReady){ pendingArgs=a; return; }
+  if(a.r5 && !store["5"]){
+    store["5"]=new Map(); centers=[];
+    const {h3:ids,lat,lon,val}=a.r5;
+    for(let i=0;i<ids.length;i++){
+      store["5"].set(ids[i], {v: val? val[i]:null});
+      centers.push([ids[i], lat[i], lon[i]]);
+    }
+  } else if(a.r5 && a.r5.val && store["5"]){
+    const {h3:ids,val}=a.r5;
+    for(let i=0;i<ids.length;i++){ const r=store["5"].get(ids[i]); if(r) r.v=val[i]; }
+  }
+  for(const res in (a.chunks||{})){
+    if(!store[res]) store[res]=new Map();
+    const byParent=a.chunks[res];
+    for(const parent in byParent){
+      const c=byParent[parent];
+      for(let i=0;i<c.h3.length;i++){
+        store[res].set(c.h3[i], {v:c.val?c.val[i]:null,
+          bc:c.bc?c.bc[i]:0, fl:c.fl?c.fl[i]:0, mh:c.mh?c.mh[i]:0});
+      }
+      requested.add(res+":"+parent);
+    }
+  }
+  redraw();
+  maybeNeed();
+}
+
+/* ---------- viewport -> parents ---------- */
+function visibleParents(){
+  if(!map||!centers.length) return [];
+  const b=map.getBounds();
+  const w=b.getWest(), e=b.getEast(), s=b.getSouth(), n=b.getNorth();
+  const padLon=(e-w)*0.25, padLat=(n-s)*0.25, out=[];
+  for(const[id,la,lo] of centers)
+    if(lo>w-padLon&&lo<e+padLon&&la>s-padLat&&la<n+padLat) out.push(id);
+  const CAP={6:140,7:120,8:48,9:10};
+  return out.slice(0, CAP[activeRes(view.zoom)]||60);
+}
+function maybeNeed(){
+  hudUpdate();
+  const res=activeRes(view.zoom);
+  if(res===5) return;
+  const missing=visibleParents().filter(p=>!requested.has(res+":"+p));
+  if(!missing.length) return;
+  clearTimeout(needTimer);
+  needTimer=setTimeout(()=>{
+    missing.forEach(p=>requested.add(res+":"+p));
+    setValue({t:"need", res:res, parents:missing, nonce:Date.now()});
+  }, 280);
+}
+
+/* ---------- procedural buildings (until Plate II real tiles) ---------- */
+function buildingsFor(rows){
+  const polys=[];
+  for(const [id,row] of rows){
+    const n=Math.min(row.bc||0, 26); if(!n) continue;
+    const rnd=mulberry32(hashStr(id));
+    const c=h3.h3ToGeo(id); if(!c) continue;
+    const [clat,clon]=c;
+    const mLat=111320, mLon=111320*Math.cos(clat*Math.PI/180);
+    for(let i=0;i<n;i++){
+      const ang=rnd()*Math.PI*2, dist=Math.sqrt(rnd())*148;
+      const bx=clon+Math.cos(ang)*dist/mLon, by=clat+Math.sin(ang)*dist/mLat;
+      const half=(5+rnd()*6), hx=half/mLon, hy=half/mLat;
+      const rot=rnd()*Math.PI, cs=Math.cos(rot), sn=Math.sin(rot);
+      const pts=[[-hx,-hy],[hx,-hy],[hx,hy],[-hx,hy]].map(([x,y])=>
+        [bx + x*cs - y*sn, by + x*sn + y*cs]);
+      const floors=Math.max(1, (row.fl||2)*(0.5+rnd()));
+      polys.push({polygon:pts, h:Math.min(3.2*floors, row.mh>3?row.mh:60)});
+    }
+  }
+  return polys;
+}
+
+/* ---------- deck layers ---------- */
+function hexLayer(res, rows, isTop){
+  const structure = !(args && args.layer && args.layer.col);
+  const vmax = args && args.layer && args.layer.vmax ? (args.layer.vmax[String(res)]||1) : 1;
+  const data=[...rows.entries()].map(([id,r])=>({id, v:r.v}));
+  return new deck.H3HexagonLayer({
+    id:"hex-r"+res, data, beforeId:window.__beforeId,
+    getHexagon:d=>d.id,
+    filled:true, extruded:false, stroked:true, coverage:0.985,
+    getFillColor:d=>{
+      if(structure||d.v==null) return [122,127,133, isTop?4:2];
+      const t=Math.log1p(Math.max(0,d.v))/Math.log1p(vmax||1);
+      return [...ramp(t), t<0.04 ? 4 : 8+t*70];
+    },
+    getLineColor:[...LINE, isTop?34:11],
+    lineWidthMinPixels: isTop?0.7:0.4,
+    pickable:isTop, autoHighlight:isTop,
+    highlightColor:[22,24,26,26],
+    transitions:{getFillColor:350, getLineColor:350},
+    updateTriggers:{getFillColor:[structure, vmax, args&&args.layer&&args.layer.col]},
+  });
+}
+
+function buildLayers(){
+  const z=view.zoom, res=activeRes(z), layers=[];
+  const order=[5,6,7,8,9].filter(r=>r<=res && store[String(r)] && store[String(r)].size);
+  for(const r of order) layers.push(hexLayer(r, store[String(r)], r===res || (r===Math.max(...order)&&r<res)));
+  if(z>=BUILDING_ZOOM && store["9"] && !window.__realBldg){
+    layers.push(new deck.SolidPolygonLayer({
+      id:"bldg", data:buildingsFor(store["9"]),
+      getPolygon:d=>d.polygon, extruded:true, getElevation:d=>d.h,
+      getFillColor:[240,240,238,235], getLineColor:[122,127,133,28],
+      material:{ambient:0.5,diffuse:0.5,shininess:20,specularColor:[90,90,90]},
+      transitions:{getElevation:{duration:550, enter:()=>[0]}},
+    }));
+  }
+  if(args && args.live){
+    const L=args.live;
+    if(L.buses && L.buses.length){
+      layers.push(new deck.ScatterplotLayer({
+        id:"live-bus", beforeId:window.__beforeId,
+        data:[...L.buses].sort((a,b)=>(String(a[3])>String(b[3])?1:-1)),
+        getPosition:d=>[d[0],d[1]], getRadius:16,
+        radiusMinPixels:2.2, radiusMaxPixels:5,
+        getFillColor:[22,24,26,205], stroked:false, pickable:false,
+        transitions:{getPosition:{duration:18000, easing:t=>t}},
+        updateTriggers:{getPosition:[L.ts]},
+      }));
+    }
+    if(L.bikes && L.bikes.length){
+      layers.push(new deck.ScatterplotLayer({
+        id:"live-bike", beforeId:window.__beforeId,
+        data:L.bikes, getPosition:d=>[d[0],d[1]],
+        getRadius:d=>6+d[2]*15, radiusMinPixels:1.2, radiusMaxPixels:4,
+        getFillColor:d=>[122,127,133, 70+d[2]*100], stroked:false, pickable:false,
+        transitions:{getRadius:800, getFillColor:800},
+        updateTriggers:{getRadius:[L.ts], getFillColor:[L.ts]},
+      }));
+    }
+  }
+  if(args && args.focus && store["9"] && store["9"].has(args.focus)){
+    layers.push(new deck.H3HexagonLayer({id:"focus", beforeId:window.__beforeId, data:[{id:args.focus}],
+      getHexagon:d=>d.id, filled:true, stroked:true, extruded:false,
+      getFillColor:[217,72,15,18], getLineColor:[217,72,15,215],
+      lineWidthMinPixels:2, pickable:false}));
+  }
+  return layers;
+}
+function redraw(){ if(overlay) overlay.setProps({layers: buildLayers()}); }
+
+/* ---------- interactions ---------- */
+function onClick(info){
+  if(!info || !info.object || !info.object.id) return;
+  const id=info.object.id;
+  const lid=(info.layer&&info.layer.id)||"";
+  const m=lid.match(/^hex-r(\d)/);
+  const pickedRes=m?parseInt(m[1]):activeRes(view.zoom);
+  if(pickedRes>=9){ setValue({t:"select", h3:id, nonce:Date.now()}); redraw(); return; }
+  const next=LADDER.find(([r])=>r===Math.min(pickedRes+1,9));
+  const c=h3.h3ToGeo(id); if(!c) return;
+  map.flyTo({center:[c[1],c[0]], zoom:(next?next[1]:11)+0.55, duration:950, essential:true});
+}
+function onHover(info){
+  if(info && info.object && info.object.v!=null && args && args.layer && args.layer.col){
+    tip.style.display="block";
+    tip.style.left=(info.x+14)+"px"; tip.style.top=(info.y+14)+"px";
+    tip.innerHTML="<b>"+Number(info.object.v).toLocaleString(undefined,{maximumFractionDigits:2})+
+      "</b> "+(args.layer.label||"")+"<br/>click to open";
+  } else tip.style.display="none";
+}
+
+/* ---------- boot ---------- */
+function boot(){
+  try{ const sv=sessionStorage.getItem("jm_view_nyc3");
+       if(sv) view={...view, ...JSON.parse(sv)}; }catch(e){}
+  const v0=(window.__DBG_ARGS&&window.__DBG_ARGS.view0)||(args&&args.view0);
+  if(v0 && !sessionStorage.getItem("jm_view_nyc3")) view={...view, ...v0};
+
+  map=new maplibregl.Map({
+    container:"map", style:"./basemap-style.json",
+    center:[view.longitude, view.latitude], zoom:view.zoom,
+    pitch:view.pitch, bearing:view.bearing,
+    minZoom:8.6, maxZoom:17.4, maxPitch:62,
+    maxBounds:[[-74.32,40.46],[-73.62,40.98]],
+    attributionControl:{compact:true}, antialias:true,
+  });
+  map.on("move", ()=>{
+    const c=map.getCenter();
+    view={latitude:c.lat, longitude:c.lng, zoom:map.getZoom(),
+          pitch:map.getPitch(), bearing:map.getBearing()};
+    saveView(); hudUpdate();
+  });
+  map.on("moveend", maybeNeed);
+  map.on("error", e=>{ if(e&&e.error){hud.textContent=("MAP "+e.error.message).slice(0,160); hud.style.color="#B04A3A";} });
+  map.on("load", ()=>{
+    if(!deck || !deck.MapboxOverlay){ hud.textContent="ERR deck.MapboxOverlay missing (bundle)"; hud.style.color="#B04A3A"; return; }
+    window.__beforeId=(map.getStyle().layers.find(l=>l.type==="symbol")||{}).id;
+    if(args && args.buildings_url && window.pmtiles){
+      try{
+        const proto=new pmtiles.Protocol();
+        maplibregl.addProtocol("pmtiles", proto.tile);
+        map.addSource("bldg", {type:"vector", url:"pmtiles://"+args.buildings_url});
+        const firstSymbol=window.__beforeId;
+        map.addLayer({id:"bldg3d", source:"bldg", "source-layer":"buildings",
+          type:"fill-extrusion", minzoom:13.4,
+          paint:{"fill-extrusion-color":"#F1F0ED",
+                 "fill-extrusion-height":["get","h"],
+                 "fill-extrusion-base":0,
+                 "fill-extrusion-opacity":0.8}}, firstSymbol);
+        window.__realBldg=true;
+      }catch(e){ hud.textContent=("BLDG "+e.message).slice(0,160); }
+    }
+    overlay=new deck.MapboxOverlay({interleaved:true, layers:[],
+      onClick:onClick, onHover:onHover,
+      getCursor:({isHovering})=>isHovering?"pointer":"grab"});
+    map.addControl(overlay);
+    mapReady=true;
+    if(pendingArgs){ const a=pendingArgs; pendingArgs=null; ingest(a); }
+    hudUpdate();
+  });
+}
+window.addEventListener("message", ev=>{
+  const m=ev.data;
+  if(!m || m.type!=="streamlit:render") return;
+  if(!map) boot();
+  ingest(m.args);
+  toStreamlit("streamlit:setFrameHeight", {height: m.args.height||580});
+});
+toStreamlit("streamlit:componentReady", {apiVersion:1});
+toStreamlit("streamlit:setFrameHeight", {height: 580});
+if(window.__DBG_ARGS){ try{ boot(); ingest(window.__DBG_ARGS); }catch(e){ hud.textContent="ERR "+e.message; } }
+</script>
+</body>
+</html>

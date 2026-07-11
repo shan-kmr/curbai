@@ -1,759 +1,813 @@
 """
-CurbIndex — geospatial intelligence for urban mobility, built on open data.
+The Hex Atlas — click any hex, see everything open data + the geofm model know
+about that cell, raw (no scores).
 
-Three tabs demonstrating what a geo data platform enables:
-    1. Site Intelligence       — where should a business open?
-    2. Brand Location Planner  — pick a category, find the white space
-    3. Neighborhood Character  — what is this block's functional identity?
-
-Click any hex to select it — the side panel updates with per-component
-score breakdown and the five most-similar cells elsewhere in the city.
+Two scopes:
+  · United States — national res-5 overview (32k cells), click to drill into
+    res-9 (174 m). Safety = NHTSA FARS fatal crashes; census/traffic sections
+    appear automatically when their parquets exist.
+  · Ten deep cities (US + India) — res-9 direct. Crashes are NYC-only
+    (open Vision Zero); the base card is global.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-from typing import Callable
+import json
+import os
+import sys
+import time
+from pathlib import Path
 
+import duckdb
+import h3
+import numpy as np
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
-from geopy.exc import GeopyError
-from geopy.geocoders import Nominatim
 
-from curbai import brand_planner, catchment, scoring, similarity, temporal
-from curbai.loader import (
-    SCORED_PATH,
-    feature_columns,
-    load_pois_sf,
-    load_road_graph,
-    load_sf_scored,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from curbai import ui  # noqa: E402
 
-st.set_page_config(
-    page_title="CurbIndex — geospatial intelligence for urban mobility",
-    page_icon="🛰️",
-    layout="wide",
-    initial_sidebar_state="auto",
-)
+st.set_page_config(page_title="Janus — The Hex Atlas", page_icon="🔬", layout="wide")
+ui.inject()
 
-SF_CENTER_LAT = 37.773
-SF_CENTER_LON = -122.441
+DATADIR = Path(__file__).resolve().parents[1] / "data"
+DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+US = "New York · tiled"
+
+# label -> (slug, lat, lon, zoom)
+CITIES = {
+    "New York": ("nyc", 40.739, -74.001, 10.2),
+    "Los Angeles": ("la", 34.048, -118.363, 9.5),
+    "Chicago": ("chicago", 41.83, -87.72, 9.8),
+    "Houston": ("houston", 29.80, -95.42, 9.3),
+    "San Francisco": ("sf", 37.763, -122.44, 11.3),
+    "Delhi": ("delhi", 28.60, 77.14, 10.0),
+    "Mumbai": ("mumbai", 19.11, 72.88, 10.6),
+    "Bengaluru": ("bangalore", 12.98, 77.61, 10.4),
+    "Hyderabad": ("hyderabad", 17.42, 78.46, 10.3),
+    "Chennai": ("chennai", 13.06, 80.23, 10.6),
+}
+
+# Base metrics that shade the map (global). Crash layers are prepended
+# where crash data exists (Vision Zero for NYC, FARS for the US).
+LAYERS = {
+    "Population": ("kontur_population", "{:,.0f} residents"),
+    "POIs / places": ("poi_count", "{:,.0f} POIs"),
+    "Buildings": ("building_count", "{:,.0f} buildings"),
+    "Movement · visits": ("wt_visit_count", "{:,.0f} visits"),
+    "Roads": ("road_count", "{:,.0f} road segments"),
+    "Night-lights": ("nightlight_2021", "{:.0f} brightness"),
+}
+
+US_R5 = DATADIR / "us_r5.parquet"
+US_R9_GLOB = str(DATADIR / "us_r9" / "*.parquet")
+FARS = DATADIR / "fars_us_h3.parquet"
+ACS = DATADIR / "acs_us_h3.parquet"
+HPMS = DATADIR / "hpms_us_h3.parquet"
+NRI = DATADIR / "nri_us_h3.parquet"
+LODES = DATADIR / "lodes_us_h3.parquet"
+LODESOD = DATADIR / "lodesod_us_h3.parquet"
+GDELT = DATADIR / "gdelt_us_h3.parquet"
+EAGLEI = DATADIR / "eaglei_us_h3.parquet"
+NDVI = DATADIR / "ndvi_us_h3.parquet"
+MLY = DATADIR / "mapillary_us_h3.parquet"
+OSMPED = DATADIR / "osmped_us_h3.parquet"
+WZDX = DATADIR / "wzdx_us_h3.parquet"
+SLOPE = DATADIR / "slope_nyc_h3.parquet"
+SWP = DATADIR / "sidewalkphys_nyc_h3.parquet"
+SWD = DATADIR / "nycsw_width_h3.parquet"
+OSMW = DATADIR / "osmwidth_us_h3.parquet"
+DERIVED = DATADIR / "us_derived_h3.parquet"
+WM = DATADIR / "worldmove_us_h3.parquet"
+
+DATASET_REPO = "skay97/curbai-data"
 
 
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
+@st.cache_resource(show_spinner="First boot — pulling the data layers from the hub…")
+def ensure_data() -> None:
+    """The Space ships code only (1 GB cap); layers live in a private HF
+    dataset. No-op when data is already on disk (local dev / warm container).
+    Needs HF_TOKEN as a Space secret to read the private repo."""
+    if US_R5.exists():
+        return
+    from huggingface_hub import snapshot_download
+    snapshot_download(DATASET_REPO, repo_type="dataset",
+                      local_dir=DATADIR.parent,
+                      allow_patterns=["data/*.parquet", "data/us_r9/*.parquet",
+                                      "data/us_lod/*.parquet", "data/us_boundary.wkt"],
+                      token=os.environ.get("HF_TOKEN"))
 
 
-@st.cache_data(show_spinner="Loading SF scored grid…")
-def get_data() -> pd.DataFrame:
-    return load_sf_scored()
+ensure_data()
 
 
-@st.cache_resource(show_spinner="Building similarity index…")
-def get_similarity_index(df: pd.DataFrame):
-    feat_cols = [
-        c for c in feature_columns(df)
-        if c not in ("score_site", "score_character")
-    ]
-    return similarity.build_similarity(df, feat_cols), feat_cols
+# ---------- loaders ----------
+
+@st.cache_data(show_spinner="Loading city grid…")
+def load(slug: str) -> pd.DataFrame:
+    df = pd.read_parquet(DATADIR / f"{slug}_base.parquet")
+    if slug == "nyc" and (DATADIR / "nyc_crashes_h3.parquet").exists():
+        crash = pd.read_parquet(DATADIR / "nyc_crashes_h3.parquet")
+        cols = [c for c in crash.columns if c not in ("center_lat", "center_lon")]
+        df = df.merge(crash[cols], on="h3_index", how="left")
+    return df
 
 
-@st.cache_data(show_spinner="Loading category data…")
-def get_categories() -> list[str]:
-    return brand_planner.list_categories(min_count=10)
+ROLLUPS = DATADIR / "us_r5_rollups.parquet"
 
 
-@st.cache_data(show_spinner="Loading POIs…")
-def get_pois() -> pd.DataFrame:
-    return load_pois_sf()
+@st.cache_data(show_spinner="Loading the United States…")
+def load_us_overview() -> pd.DataFrame:
+    df = pd.read_parquet(US_R5)
+    if ROLLUPS.exists():
+        # precomputed by scripts/build_derived.py — no parent math at load
+        df = df.merge(pd.read_parquet(ROLLUPS), on="h3_index", how="left")
+    elif FARS.exists():
+        fars = pd.read_parquet(FARS, columns=["h3_index", "fars_crashes", "fars_killed"])
+        fars["res5"] = fars.h3_index.map(lambda h: h3.h3_to_parent(h, 5))
+        g = fars.groupby("res5")[["fars_crashes", "fars_killed"]].sum().reset_index()
+        df = df.merge(g, left_on="h3_index", right_on="res5", how="left").drop(columns=["res5"])
+    return df
 
 
-@st.cache_resource(show_spinner="Loading walk-network…")
-def get_road_graph():
-    return load_road_graph()
+@st.cache_data(show_spinner="Opening this cell at 174 m…")
+def load_us_children(r5: str) -> pd.DataFrame:
+    con = duckdb.connect()
+    kids = con.execute(
+        f"SELECT * FROM read_parquet('{US_R9_GLOB}') WHERE res5 = ?", [r5]
+    ).df()
+    con.register("kids", kids[["h3_index"]])
+    for side in (FARS, ACS, HPMS, NRI, LODES, LODESOD, GDELT, EAGLEI, NDVI,
+                 MLY, OSMPED, WZDX, SLOPE, SWP, SWD, OSMW, DERIVED, WM):
+        if not side.exists():
+            continue
+        s = con.execute(
+            f"SELECT t.* FROM read_parquet('{side.as_posix()}') t "
+            "JOIN kids USING (h3_index)"
+        ).df()
+        # first layer to bring a column wins (centers, tract_geoid, ...)
+        s = s.drop(columns=[c for c in s.columns if c != "h3_index" and c in kids.columns])
+        kids = kids.merge(s, on="h3_index", how="left")
+    return kids
 
 
-@st.cache_data(show_spinner=False)
-def compute_catchment(h3_id: str, max_minutes: int = 15) -> dict[str, float]:
-    """Dijkstra walk-time from h3_id; cached per selected cell.
+def apply_layer(df: pd.DataFrame, col: str, valfmt: str, elev_max: float = 320.0) -> pd.DataFrame:
+    v = pd.to_numeric(df[col], errors="coerce").fillna(0).clip(lower=0)
+    top = float(v.max()) or 1.0
+    df["_color"] = (np.log1p(v) / (np.log1p(top) or 1)).apply(ui.count_color)
+    df["_elev"] = (v / top * elev_max).astype(float)
+    df["_val_str"] = v.apply(lambda x: valfmt.format(x))
+    return df
 
-    Streamlit's @st.cache_data hashes the args — the road graph and cells df
-    are fetched inside so the cache key stays small.
+
+# ---------- small formatters ----------
+
+def fmt_hour(h) -> str:
+    if h is None or h < 0:
+        return "—"
+    h = int(h)
+    return f"{(h % 12) or 12}{'am' if h < 12 else 'pm'}"
+
+
+def _g(row, col):
+    if col not in row.index:
+        return None
+    v = row.get(col)
+    # pd.isna catches numpy float32/float64 NaN too — isinstance(float) doesn't
+    return None if v is None or (not isinstance(v, str) and pd.isna(v)) else v
+
+
+def _fmt(v, f="{:,.0f}") -> str:
+    return "—" if v is None else f.format(v)
+
+
+def _dist(km) -> str:
+    return "—" if km is None else (f"{km*1000:.0f} m" if km < 1 else f"{km:.1f} km")
+
+
+def _cat(s) -> str:
+    if not s:
+        return "—"
+    s = str(s).strip("[]'\" ")
+    return " · ".join(p.strip() for p in s.split(">")[-2:]) if ">" in s else s
+
+
+def _amenities(row) -> str:
+    have = [n for n, c in [("hospital", "has_hospital"), ("school", "has_school"),
+                           ("park", "has_park"), ("pharmacy", "has_pharmacy"),
+                           ("worship", "has_worship")] if _g(row, c)]
+    return ", ".join(have) if have else "—"
+
+
+def _hist(values) -> str:
+    mx = max(values) or 1
+    bars = "".join(f'<div class="b" style="height:{max(2, int(v/mx*100))}%"></div>' for v in values)
+    return (f'<div class="jx-hist">{bars}</div>'
+            '<div class="jx-hticks"><span>12a</span><span>6a</span><span>12p</span><span>6p</span><span>11p</span></div>')
+
+
+# ---------- card sections ----------
+
+def base_html(row, top: str = "", census: str = "", traffic: str = "",
+              flows: str = "", street: str = "") -> str:
+    """The shared raw-data card. Optional fragments slot in at fixed points:
+    top (safety/rates), census (after Who's here), traffic (after Roads),
+    flows + street (after Movement)."""
+    pop = _g(row, "kontur_population") or _g(row, "population")
+    nl = _g(row, "nightlight_2021")
+    bc, fl, mh = _g(row, "building_count"), _g(row, "avg_floors"), _g(row, "max_height")
+    poi, cat, ntr = _g(row, "poi_count"), _cat(_g(row, "top_category")), _g(row, "count_transit")
+    dh, dp, dt = _g(row, "dist_hospital_km"), _g(row, "dist_park_km"), _g(row, "dist_transit_km")
+    rc, rpri, rres = _g(row, "road_count"), _g(row, "road_primary"), _g(row, "road_residential")
+    vis, pkh, nf, rog = (_g(row, "wt_visit_count"), _g(row, "wt_peak_hour"),
+                         _g(row, "wt_night_fraction"), _g(row, "wt_radius_of_gyration_km"))
+    temp, precip = _g(row, "annual_mean_temp"), _g(row, "annual_precipitation")
+    txt = _g(row, "llmgeovec_text")
+
+    # calibrated population (census tract truth x kontur weights) when derived
+    cal = _g(row, "pop_calibrated")
+    if cal is not None:
+        pop_rows = (f'<div class="jx-row"><span class="k">Residents</span>'
+                    f'<span class="v"><b>{_fmt(cal)}</b> census-calibrated</span></div>'
+                    f'<div class="jx-row"><span class="k">Modeled index</span>'
+                    f'<span class="v">{_fmt(pop)}</span></div>')
+        who_src = "ACS × Kontur"
+    else:
+        pop_rows = (f'<div class="jx-row"><span class="k">Population</span>'
+                    f'<span class="v"><b>{_fmt(pop)}</b> modeled residents</span></div>')
+        who_src = "Kontur"
+
+    return f"""
+    <div class="jx-card">
+      <div class="jx-cid">R9 · {row.h3_index[-12:]} · 0.105 km²</div>
+      {top}
+      <div class="jx-lab jx-sec">◆ Who's here — {who_src}</div>
+      {pop_rows}
+      <div class="jx-row"><span class="k">Night-lights</span><span class="v">{_fmt(nl, '{:.0f}')}</span></div>
+      {census}
+      <div class="jx-lab jx-sec">◆ Built form — Overture</div>
+      <div class="jx-row"><span class="k">Buildings</span><span class="v"><b>{_fmt(bc)}</b> · avg {_fmt(fl, '{:.0f}')} fl</span></div>
+      <div class="jx-row"><span class="k">Tallest</span><span class="v">{_fmt(mh, '{:.0f}')} m</span></div>
+      <div class="jx-lab jx-sec">◆ Places — Overture / FSQ</div>
+      <div class="jx-row"><span class="k">POIs</span><span class="v"><b>{_fmt(poi)}</b> · {_fmt(ntr, '{:.0f}')} transit</span></div>
+      <div class="jx-row"><span class="k">Character</span><span class="v">{cat}</span></div>
+      <div class="jx-row"><span class="k">On / near</span><span class="v">{_amenities(row)}</span></div>
+      <div class="jx-lab jx-sec">◆ Access — nearest</div>
+      <div class="jx-row"><span class="k">Hospital · Park · Transit</span><span class="v">{_dist(dh)} · {_dist(dp)} · {_dist(dt)}</span></div>
+      <div class="jx-lab jx-sec">◆ Roads — OpenStreetMap</div>
+      <div class="jx-row"><span class="k">Segments</span><span class="v"><b>{_fmt(rc)}</b> · {_fmt(rpri)} primary · {_fmt(rres)} resid.</span></div>
+      {traffic}
+      <div class="jx-lab jx-sec">◆ Movement — trajectory data</div>
+      <div class="jx-row"><span class="k">Visits</span><span class="v"><b>{_fmt(vis)}</b> · peak {fmt_hour(pkh) if pkh is not None else '—'}</span></div>
+      <div class="jx-row"><span class="k">Night · radius</span><span class="v">{_fmt(nf*100 if nf is not None else None, '{:.0f}')}% · {_fmt(rog, '{:.1f}')} km</span></div>
+      {flows}
+      {street}
+      <div class="jx-lab jx-sec">◆ Climate — WorldClim{' / MODIS' if _g(row, 'ndvi_summer') is not None else ''}</div>
+      <div class="jx-row"><span class="k">Temp · rain</span><span class="v">{_fmt(temp, '{:.0f}')}°C · {_fmt(precip)} mm/yr</span></div>
+      {f'<div class="jx-row"><span class="k">Greenness (summer NDVI)</span><span class="v"><b>{_g(row, "ndvi_summer"):.2f}</b></span></div>' if _g(row, 'ndvi_summer') is not None else ''}
+      <div class="jx-lab jx-sec">◆ The model reads</div>
+      <div class="jx-txt">{(str(txt)[:210] + '…') if txt else '—'}</div>
+    </div>
     """
-    G = get_road_graph()
-    df = get_data()
-    return catchment.walk_time_cells(h3_id, G, df, max_minutes=max_minutes)
 
 
-# ---------------------------------------------------------------------------
-# Colormap
-# ---------------------------------------------------------------------------
+def nyc_safety_html(row) -> str:
+    if _g(row, "crashes") is None or _g(row, "hour_hist") is None:
+        return ""
+    fac = "".join(f'<div class="jx-fac"><span>{k.title()}</span><span class="c">{v}</span></div>'
+                  for k, v in json.loads(row.top_factors)) or '<div class="jx-fac"><span class="c">— none —</span></div>'
+    return f"""
+      <div class="jx-lab" style="margin-top:6px">◆ Safety — NYPD Vision Zero</div>
+      <div class="jx-big">{int(row.crashes):,}<small> collisions</small></div>
+      <div class="jx-row"><span class="k">Killed / injured</span><span class="v"><b>{int(row.killed)}</b> · {int(row.injured):,}</span></div>
+      <div class="jx-row"><span class="k">Pedestrian</span><span class="v">{int(row.ped_inj)} inj · {int(row.ped_kill)} killed</span></div>
+      <div class="jx-row"><span class="k">Peak</span><span class="v"><b>{DOW[int(row.peak_dow)] if row.peak_dow >= 0 else '—'} {fmt_hour(row.peak_hour)}</b></span></div>
+      {_hist(json.loads(row.hour_hist))}
+      <div class="jx-lab jx-sec" style="margin-top:6px">Top contributing factors</div>{fac}"""
 
 
-def score_to_color(score: float) -> list[int]:
-    if score is None or (isinstance(score, float) and math.isnan(score)):
-        return [60, 50, 42, 120]
-    t = max(0.0, min(1.0, float(score)))
-    stops = [
-        (0.00, (90, 60, 40)),
-        (0.25, (140, 95, 55)),
-        (0.50, (200, 150, 90)),
-        (0.75, (230, 195, 130)),
-        (1.00, (255, 225, 160)),
-    ]
-    for (t0, c0), (t1, c1) in zip(stops[:-1], stops[1:]):
-        if t0 <= t <= t1:
-            f = (t - t0) / (t1 - t0 + 1e-9)
-            rgb = [int(c0[i] + f * (c1[i] - c0[i])) for i in range(3)]
-            return rgb + [215]
-    return [255, 225, 160, 215]
+def fars_html(row) -> str:
+    """FARS fatal-crash section — US drill only. A quiet row when clean."""
+    if "fars_crashes" not in row.index:
+        return ""
+    c = _g(row, "fars_crashes")
+    if c is None:
+        return ('<div class="jx-lab" style="margin-top:6px">◆ Safety — NHTSA FARS 2022–2024</div>'
+                '<div class="jx-row"><span class="k">Fatal crashes</span><span class="v">none recorded</span></div>')
+    y0, y1 = _g(row, "fars_year_min"), _g(row, "fars_year_max")
+    yrs = f"{int(y0)}–{int(y1)}" if y0 and y1 and y0 != y1 else (f"{int(y0)}" if y0 else "2022–2024")
+    dow = _g(row, "fars_peak_dow_label") or "—"
+    hist = _hist(json.loads(row.fars_hour_hist)) if _g(row, "fars_hour_hist") else ""
+    return f"""
+      <div class="jx-lab" style="margin-top:6px">◆ Safety — NHTSA FARS {yrs}</div>
+      <div class="jx-big">{int(c):,}<small> fatal crash{'es' if c != 1 else ''}</small></div>
+      <div class="jx-row"><span class="k">Killed</span><span class="v"><b>{int(row.fars_killed)}</b></span></div>
+      <div class="jx-row"><span class="k">Peak</span><span class="v"><b>{dow} {fmt_hour(_g(row, 'fars_peak_hour'))}</b></span></div>
+      {hist}"""
 
 
-# ---------------------------------------------------------------------------
-# Geocoder
-# ---------------------------------------------------------------------------
+def acs_html(row) -> str:
+    if _g(row, "acs_median_income") is None and _g(row, "acs_population") is None:
+        return ""
+    geoid = _g(row, "tract_geoid")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Census — ACS 5-yr · tract {geoid or '—'}</div>
+      <div class="jx-row"><span class="k">Tract population</span><span class="v"><b>{_fmt(_g(row, 'acs_population'))}</b> census</span></div>
+      <div class="jx-row"><span class="k">Median income</span><span class="v"><b>{_fmt(_g(row, 'acs_median_income'), '${:,.0f}')}</b></span></div>
+      <div class="jx-row"><span class="k">Median age</span><span class="v">{_fmt(_g(row, 'acs_median_age'), '{:.0f}')}</span></div>
+      <div class="jx-row"><span class="k">Rent · home value</span><span class="v">{_fmt(_g(row, 'acs_median_rent'), '${:,.0f}')} · {_fmt(_g(row, 'acs_median_home_value'), '${:,.0f}')}</span></div>
+      <div class="jx-row"><span class="k">No-vehicle households</span><span class="v">{_fmt(_g(row, 'acs_pct_no_vehicle'), '{:.0f}%')}</span></div>"""
 
 
-@st.cache_data(show_spinner="Looking up address…")
-def geocode_sf(address: str) -> tuple[float, float] | None:
-    if not address.strip():
-        return None
-    try:
-        geocoder = Nominatim(user_agent="curbindex-demo")
-        loc = geocoder.geocode(f"{address}, San Francisco, CA", timeout=5)
-        return (float(loc.latitude), float(loc.longitude)) if loc else None
-    except GeopyError:
-        return None
+def hpms_html(row) -> str:
+    a = _g(row, "hpms_aadt_max")
+    if a is None:
+        return ""
+    trucks = _g(row, "hpms_pct_truck")
+    truck_row = (f'<div class="jx-row"><span class="k">Trucks</span><span class="v">{_fmt(trucks, "{:.0f}%")}</span></div>'
+                 if trucks is not None else "")
+    src = {"hpms2023": "FHWA HPMS 2023", "hpms2022": "FHWA HPMS 2022 · backbone"}.get(
+        str(_g(row, "hpms_source")), "FHWA HPMS")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Traffic — {src}</div>
+      <div class="jx-row"><span class="k">AADT (busiest)</span><span class="v"><b>{_fmt(a)}</b> veh/day</span></div>
+      <div class="jx-row"><span class="k">Covered segments</span><span class="v">{_fmt(_g(row, 'hpms_seg_count'))}</span></div>
+      {truck_row}"""
 
 
-def nearest_cell(df: pd.DataFrame, lat: float, lon: float) -> str | None:
-    dlat = df["center_lat"].values - lat
-    dlon = df["center_lon"].values - lon
-    idx = int((dlat * dlat + dlon * dlon).argmin())
-    return str(df["h3_index"].iloc[idx])
+def rates_html(row) -> str:
+    """Cross-layer rates — real units, named denominators. No scores."""
+    rows = []
+    r = _g(row, "drv_fatal_per_100k_aadt")
+    if r is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Fatal / traffic</span>'
+                    f'<span class="v"><b>{r:.2f}</b> /yr per 100k veh·day</span></div>')
+    v = _g(row, "drv_visits_per_resident")
+    if v is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Visits / resident</span>'
+                    f'<span class="v"><b>{v:,.1f}×</b></span></div>')
+    j = _g(row, "drv_jobs_per_resident")
+    if j is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Jobs / resident</span>'
+                    f'<span class="v"><b>{j:,.1f}×</b> daytime pull</span></div>')
+    e = _g(row, "drv_eal_per_capita")
+    if e is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Hazard loss / person</span>'
+                    f'<span class="v"><b>${e:,.0f}</b> /yr expected</span></div>')
+    if not rows:
+        return ""
+    return f'<div class="jx-lab jx-sec">◆ Rates — cross-layer</div>{"".join(rows)}'
 
 
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
+def nri_html(row) -> str:
+    """FEMA National Risk Index — tract-level hazard economics."""
+    eal = _g(row, "nri_eal_total")
+    if eal is None:
+        return ""
+    top = ""
+    th = _g(row, "nri_top_hazards")
+    if th:
+        try:
+            parts = " · ".join(f"{name} ${v/1e6:.1f}M" if v >= 1e6 else f"{name} ${v/1e3:.0f}k"
+                               for name, v in json.loads(th)[:3])
+            top = f'<div class="jx-row"><span class="k">Top hazards</span><span class="v">{parts}</span></div>'
+        except Exception:
+            pass
+    alloc = _g(row, "nri_eal_alloc")
+    alloc_row = (f'<div class="jx-row"><span class="k">This hex share</span>'
+                 f'<span class="v"><b>${alloc:,.0f}</b> /yr (pop-allocated)</span></div>'
+                 if alloc is not None else "")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Hazard risk — FEMA NRI · tract</div>
+      <div class="jx-row"><span class="k">Expected annual loss</span><span class="v"><b>${eal:,.0f}</b> /yr tract</span></div>
+      {alloc_row}
+      {top}
+      <div class="jx-row"><span class="k">Rating</span><span class="v">{_g(row, 'nri_risk_rating') or '—'}</span></div>"""
 
 
-def init_state() -> None:
-    if "focus_h3" not in st.session_state:
-        st.session_state["focus_h3"] = None
+def lodes_html(row) -> str:
+    j = _g(row, "lodes_jobs")
+    if j is None:
+        return ""
+    mix = " · ".join(f"{n} {int(v):,}" for n, v in
+                     [("retail", _g(row, "lodes_jobs_retail")), ("food", _g(row, "lodes_jobs_food")),
+                      ("health", _g(row, "lodes_jobs_health")), ("edu", _g(row, "lodes_jobs_edu"))]
+                     if v)
+    mix_row = (f'<div class="jx-row"><span class="k">Mix</span><span class="v">{mix}</span></div>'
+               if mix else "")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Jobs — Census LODES · BG-centroid</div>
+      <div class="jx-row"><span class="k">Workplace jobs</span><span class="v"><b>{int(j):,}</b> (block-group lump)</span></div>
+      {mix_row}"""
 
 
-def set_focus(h3_id: str | None) -> None:
-    st.session_state["focus_h3"] = h3_id
+def lodesod_html(row) -> str:
+    """Who works here — worker-origin profile from census home↔work pairs."""
+    w = _g(row, "lodesod_workers")
+    if w is None:
+        return ""
+    inc = _g(row, "lodesod_home_income")
+    far = _g(row, "lodesod_pct_far")
+    nov = _g(row, "lodesod_home_novehicle_pct")
+    cty = _g(row, "lodesod_top_origin_county")
+    shr = _g(row, "lodesod_top_origin_share")
+    origin = (f'<div class="jx-row"><span class="k">Top origin county</span>'
+              f'<span class="v">{cty} · {_fmt(shr, "{:.0f}%")}</span></div>' if cty else "")
+    return f"""
+      <div class="jx-lab jx-sec">◆ Who works here — LODES O-D</div>
+      <div class="jx-row"><span class="k">Workers</span><span class="v"><b>{_fmt(w)}</b></span></div>
+      <div class="jx-row"><span class="k">Live in tracts of</span><span class="v"><b>{_fmt(inc, '${:,.0f}')}</b> median income</span></div>
+      <div class="jx-row"><span class="k">Commute &gt;25 km</span><span class="v">{_fmt(far, '{:.0f}%')} · {_fmt(nov, '{:.0f}%')} carless homes</span></div>
+      {origin}"""
 
 
-def parse_pydeck_selection(event, current_focus: str | None) -> str | None:
-    if event is None:
-        return None
+def gdelt_html(row) -> str:
+    """Geocoded news attention — counts by category, one tone number."""
+    n = _g(row, "gdelt_events")
+    if n is None:
+        return ""
+    tone = _g(row, "gdelt_tone_mean")
+    return f"""
+      <div class="jx-lab jx-sec">◆ News attention — GDELT · place-level</div>
+      <div class="jx-row"><span class="k">Geocoded events (180 d)</span><span class="v"><b>{_fmt(n)}</b> · {_fmt(_g(row, 'gdelt_days'), '{:.0f}')} days</span></div>
+      <div class="jx-row"><span class="k">Protest · conflict</span><span class="v">{_fmt(_g(row, 'gdelt_protest'))} · {_fmt(_g(row, 'gdelt_conflict'))}</span></div>
+      <div class="jx-row"><span class="k">Mean tone</span><span class="v">{_fmt(tone, '{:+.1f}')}</span></div>"""
+
+
+def eaglei_html(row) -> str:
+    """Power reliability — EAGLE-I county outage history. Headline is the
+    SAIDI-like hours-dark-per-customer; raw any-customer-out hours saturate
+    for big counties and are not shown."""
+    h = _g(row, "eaglei_hrs_dark_per_cust_yr")
+    if h is None:
+        return ""
+    return f"""
+      <div class="jx-lab jx-sec">◆ Power reliability — EAGLE-I · county</div>
+      <div class="jx-row"><span class="k">Hours dark / customer</span><span class="v"><b>{h:,.1f}</b> /yr</span></div>
+      <div class="jx-row"><span class="k">Worst event</span><span class="v">{_fmt(_g(row, 'eaglei_max_out'))} customers out</span></div>"""
+
+
+def mly_html(row) -> str:
+    """Street furniture — Mapillary detections (coverage-biased: counts are
+    visibility-weighted by how much imagery exists)."""
+    tot = _g(row, "mly_features_total")
+    if tot is None:
+        return ""
+    return f"""
+      <div class="jx-lab jx-sec">◆ Streetscape — Mapillary · detections</div>
+      <div class="jx-row"><span class="k">Crosswalks</span><span class="v"><b>{_fmt(_g(row, 'mly_crosswalks'))}</b></span></div>
+      <div class="jx-row"><span class="k">Lights · poles</span><span class="v">{_fmt(_g(row, 'mly_streetlights'))} · {_fmt(_g(row, 'mly_poles'))}</span></div>
+      <div class="jx-row"><span class="k">Cones (construction)</span><span class="v">{_fmt(_g(row, 'mly_cones'))}</span></div>
+      <div class="jx-row"><span class="k">All detections</span><span class="v">{_fmt(tot)}</span></div>"""
+
+
+def osmped_html(row) -> str:
+    """Pedestrian/curb attributes — OSM tags + NYC planimetric width, with
+    decision ratios (share of controlled crossings, share of accessible kerbs)."""
+    if all(_g(row, c) is None for c in ("osm_sidewalk_len_m", "osm_cross_signalized",
+                                        "osm_kerb_lowered", "osm_cross_marked",
+                                        "swd_width_eff_m")):
+        return ""
+    rows = []
+    w = _g(row, "swd_width_eff_m")
+    if w is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Effective width</span>'
+                    f'<span class="v"><b>{w:.1f} m</b> · 2·area/perimeter, NYC planimetrics</span></div>')
+    ow = _g(row, "osmw_width_med_m")
+    if ow is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Tagged width</span>'
+                    f'<span class="v"><b>{ow:.1f} m</b> · OSM width=*, n={_fmt(_g(row, "osmw_width_n"), "{:.0f}")}</span></div>')
+    sm = _g(row, "osmw_smooth_med")
+    if sm is not None:
+        lbl = ["excellent", "good", "intermediate", "bad", "very bad",
+               "horrible", "very horrible", "impassable"][int(min(7, max(0, round(sm))))]
+        rows.append(f'<div class="jx-row"><span class="k">Tagged smoothness</span>'
+                    f'<span class="v">{lbl} · n={_fmt(_g(row, "osmw_smooth_n"), "{:.0f}")}</span></div>')
+    sl = _g(row, "osm_sidewalk_len_m")
+    if sl is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Sidewalk mapped</span>'
+                    f'<span class="v"><b>{_fmt(sl)}</b> m</span></div>')
+    sig, mk, um = (_g(row, "osm_cross_signalized") or 0, _g(row, "osm_cross_marked") or 0,
+                   _g(row, "osm_cross_unmarked") or 0)
+    if sig + mk + um > 0:
+        ctrl = 100 * (sig + mk) / (sig + mk + um)
+        rows.append(f'<div class="jx-row"><span class="k">Crossings</span>'
+                    f'<span class="v">{sig:.0f} signal · {mk:.0f} marked · {um:.0f} unmarked → '
+                    f'<b>{ctrl:.0f}%</b> controlled</span></div>')
+    lo, fl_, ra = (_g(row, "osm_kerb_lowered") or 0, _g(row, "osm_kerb_flush") or 0,
+                   _g(row, "osm_kerb_raised") or 0)
+    if lo + fl_ + ra > 0:
+        acc = 100 * (lo + fl_) / (lo + fl_ + ra)
+        rows.append(f'<div class="jx-row"><span class="k">Kerbs</span>'
+                    f'<span class="v">{lo:.0f} lowered · {fl_:.0f} flush · {ra:.0f} raised → '
+                    f'<b>{acc:.0f}%</b> rollable</span></div>')
+    t = _g(row, "osm_tactile")
+    if t is not None and t > 0:
+        rows.append(f'<div class="jx-row"><span class="k">Tactile paving</span>'
+                    f'<span class="v">{t:.0f}</span></div>')
+    return '<div class="jx-lab jx-sec">◆ Pedestrian — OSM / NYC planimetrics</div>' + "".join(rows)
+
+
+def wzdx_html(row) -> str:
+    """Live work zones — WZDx snapshot."""
+    z = _g(row, "wzdx_zones")
+    if z is None:
+        return ""
+    snap = str(_g(row, "wzdx_snapshot") or "")[:10]
+    return f"""
+      <div class="jx-lab jx-sec">◆ Work zones — WZDx · snapshot {snap}</div>
+      <div class="jx-row"><span class="k">Active zones</span><span class="v"><b>{_fmt(z)}</b> · {_fmt(_g(row, 'wzdx_lane_impact'))} lane-closing</span></div>
+      <div class="jx-row"><span class="k">Type</span><span class="v">{_g(row, 'wzdx_top_type') or '—'}</span></div>"""
+
+
+def phys_html(row) -> str:
+    """Sidewalk physics — measured walk-vibration where we walked, 3DEP slope
+    everywhere in the pilot grid. Honest flags: measured vs inferred."""
+    sl = _g(row, "slope_pct_med")
+    rg = _g(row, "swp_rough_g_rms")
+    if sl is None and rg is None:
+        return ""
+    rows = []
+    if rg is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Walk vibration</span>'
+                    f'<span class="v"><b>{rg:.2f} g</b> RMS · measured, '
+                    f'{_fmt(_g(row, "swp_walks"), "{:.0f}")} walk(s)</span></div>')
+    if sl is not None:
+        rows.append(f'<div class="jx-row"><span class="k">Terrain slope</span>'
+                    f'<span class="v"><b>{sl:.1f}%</b> med · {_fmt(_g(row, "slope_pct_p95"), "{:.0f}")}% p95 · inferred (3DEP 10 m)</span></div>')
+        rows.append(f'<div class="jx-row"><span class="k">Elevation</span>'
+                    f'<span class="v">{_fmt(_g(row, "elev_m_med"), "{:.0f}")} m · range {_fmt(_g(row, "elev_range_m"), "{:.0f}")} m</span></div>')
+    return ('<div class="jx-lab jx-sec">\u25c6 Sidewalk physics \u2014 walks / 3DEP</div>' + "".join(rows))
+
+
+def flows_html(row) -> str:
+    if _g(row, "wm_inflow") is None and _g(row, "wm_outflow") is None:
+        return ""
+    return f"""
+      <div class="jx-lab jx-sec">◆ Flows — O-D panel</div>
+      <div class="jx-row"><span class="k">In / out</span><span class="v"><b>{_fmt(_g(row, 'wm_inflow'))}</b> · {_fmt(_g(row, 'wm_outflow'))} trips</span></div>
+      <div class="jx-row"><span class="k">Destination diversity</span><span class="v">{_fmt(_g(row, 'wm_dest_diversity'), '{:.0f}')} unique</span></div>"""
+
+
+def render_card(row) -> None:
+    """City card — NYC gets Vision Zero + streetscape."""
+    street = phys_html(row)
+    sw = _g(row, "nycsw_sidewalk_length_m")
+    if sw is not None:
+        street = (f'<div class="jx-lab jx-sec">◆ Streetscape — NYC DOT</div>'
+                  f'<div class="jx-row"><span class="k">Sidewalk</span><span class="v">{_fmt(sw)} m</span></div>')
+    st.markdown(base_html(row, top=nyc_safety_html(row), street=street), unsafe_allow_html=True)
+
+
+def render_us_card(row) -> None:
+    """US drill card — FARS + rates on top; census, NRI, jobs, worker-origins,
+    traffic, work zones, flows, news, power, streetscape, pedestrian sections
+    light up as their parquets exist."""
+    st.markdown(base_html(row,
+                          top=fars_html(row) + rates_html(row),
+                          census=acs_html(row) + nri_html(row) + lodes_html(row) + lodesod_html(row),
+                          traffic=hpms_html(row) + wzdx_html(row),
+                          flows=flows_html(row) + gdelt_html(row) + eaglei_html(row),
+                          street=phys_html(row) + mly_html(row) + osmped_html(row)),
+                unsafe_allow_html=True)
+
+
+def parse_selection(event, current):
     sel = getattr(event, "selection", None)
     if sel is None and isinstance(event, dict):
         sel = event.get("selection")
-    if not sel:
+    objs = sel.get("objects") if isinstance(sel, dict) else getattr(sel, "objects", None)
+    if not objs:
         return None
-    objects = sel.get("objects") if isinstance(sel, dict) else getattr(sel, "objects", None)
-    if not objects:
-        return None
-    for _lid, obj_list in objects.items():
-        if not obj_list:
-            continue
-        h3_hit = obj_list[0].get("h3_index") if isinstance(obj_list[0], dict) else None
-        if h3_hit and h3_hit != current_focus:
-            return h3_hit
+    for _lid, ol in objs.items():
+        if ol and isinstance(ol[0], dict):
+            h = ol[0].get("h3_index")
+            if h and h != current:
+                return h
     return None
 
 
-# ---------------------------------------------------------------------------
-# Deck builder
-# ---------------------------------------------------------------------------
-
-
-def _catchment_color(minutes: float) -> list[int]:
-    """Translucent teal tint by walk-time bucket (closer = more opaque)."""
-    if minutes <= 5:
-        return [100, 210, 230, 150]
-    if minutes <= 10:
-        return [100, 210, 230, 90]
-    if minutes <= 15:
-        return [100, 210, 230, 50]
-    return [0, 0, 0, 0]
-
-
-def build_deck(
-    df: pd.DataFrame,
-    score_col: str,
-    title: str,
-    focus_h3: str | None,
-    catchment_walk_times: dict[str, float] | None = None,
-) -> pdk.Deck:
-    df = df.copy()
-    df["_color"] = df[score_col].apply(score_to_color)
-    df["_elev"] = df[score_col] * 400
-    df["_score_pct"] = (df[score_col] * 100).round(1)
-
-    focus_df = df[df["h3_index"] == focus_h3] if focus_h3 else None
-
-    layers: list[pdk.Layer] = [
-        pdk.Layer(
-            "H3HexagonLayer",
-            id="hex",
-            data=df,
-            get_hexagon="h3_index",
-            get_fill_color="_color",
-            get_elevation="_elev",
-            elevation_scale=1,
-            extruded=True,
-            pickable=True,
-            auto_highlight=True,
-            coverage=0.92,
-        )
-    ]
-    if catchment_walk_times:
-        catch_rows = [
-            {"h3_index": h, "_catch_color": _catchment_color(t)}
-            for h, t in catchment_walk_times.items()
-        ]
-        catch_df = pd.DataFrame(catch_rows)
-        layers.append(
-            pdk.Layer(
-                "H3HexagonLayer",
-                id="catchment",
-                data=catch_df,
-                get_hexagon="h3_index",
-                get_fill_color="_catch_color",
-                extruded=False,
-                pickable=False,
-                coverage=1.0,
-                stroked=False,
-            )
-        )
-    if focus_df is not None and len(focus_df) > 0:
-        layers.append(
-            pdk.Layer(
-                "H3HexagonLayer",
-                id="focus",
-                data=focus_df,
-                get_hexagon="h3_index",
-                get_fill_color=[240, 220, 180, 170],
-                get_elevation="_elev",
-                elevation_scale=1.5,
-                extruded=True,
-                pickable=False,
-                coverage=1.0,
-                stroked=True,
-                line_width_min_pixels=3,
-                get_line_color=[240, 220, 180, 255],
-            )
-        )
-
-    clat, clon, zoom = SF_CENTER_LAT, SF_CENTER_LON, 11.4
-    if focus_df is not None and len(focus_df) > 0:
-        clat = float(focus_df["center_lat"].iloc[0])
-        clon = float(focus_df["center_lon"].iloc[0])
-        zoom = 13.1
-
-    return pdk.Deck(
+def hex_map(df, lat, lon, zoom, pitch, key, tooltip_html, focus=None, bearing=0.0):
+    layers = [pdk.Layer(
+        "H3HexagonLayer", id="atlas", data=df, get_hexagon="h3_index",
+        get_fill_color="_color", get_elevation="_elev", elevation_scale=1,
+        extruded=True, pickable=True, auto_highlight=True, coverage=0.9,
+        # tween color/height when the shade layer changes (same mounted deck)
+        transitions={"getFillColor": 450, "getElevation": 450},
+    )]
+    if focus is not None and len(focus):
+        # persistent selection accent — stroked, raised, full cobalt
+        fdf = focus.copy()
+        fdf["_elev_f"] = fdf["_elev"] * 1.05 + 6.0
+        layers.append(pdk.Layer(
+            "H3HexagonLayer", id="atlas-focus", data=fdf, get_hexagon="h3_index",
+            get_fill_color=[30, 58, 138, 235], get_elevation="_elev_f",
+            elevation_scale=1, extruded=True, pickable=False, coverage=0.98,
+            stroked=True, get_line_color=[246, 244, 239, 255], line_width_min_pixels=2,
+        ))
+    deck = pdk.Deck(
         layers=layers,
-        initial_view_state=pdk.ViewState(latitude=clat, longitude=clon, zoom=zoom, pitch=42),
-        map_style="dark",
-        tooltip={
-            "html": f"<b>{title}</b><br/>click to select<br/>"
-                    "Score: {_score_pct}<br/>H3: {h3_index}",
-            "style": {
-                "backgroundColor": "#2a221d",
-                "color": "#e6d5b8",
-                "fontSize": "12px",
-                "padding": "10px",
-                "borderRadius": "4px",
-            },
-        },
+        initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom,
+                                         pitch=pitch, bearing=bearing),
+        map_style="light",
+        tooltip={"html": tooltip_html,
+                 "style": {"backgroundColor": "#F6F4EF", "color": "#1A1815", "fontSize": "12px",
+                           "padding": "10px", "borderRadius": "4px", "border": "1px solid #E0DDD4"}},
     )
+    return st.pydeck_chart(deck, use_container_width=True, height=580,
+                           on_select="rerun", selection_mode="single-object", key=key)
 
 
-# ---------------------------------------------------------------------------
-# Side panels
-# ---------------------------------------------------------------------------
+
+# ---- page ----
+st.markdown(
+    '<div style="display:flex;align-items:baseline;gap:14px;margin:0 0 2px;">'
+    '<span style="font-family:ui-monospace,Menlo,monospace;font-size:.78rem;'
+    'letter-spacing:.3em;font-weight:700;">JANUS</span>'
+    '<span style="font-family:ui-monospace,Menlo,monospace;font-size:.62rem;'
+    'letter-spacing:.14em;text-transform:uppercase;color:#7A7F85;">Atlas · New York</span>'
+    '<span style="margin-left:auto;font-family:ui-monospace,Menlo,monospace;'
+    'font-size:.62rem;letter-spacing:.08em;">'
+    '<a href="https://shan-kmr.github.io/geo-landing/" target="_blank" '
+    'style="color:#7A7F85!important;margin-right:12px;">janus ↗</a>'
+    '<a href="https://github.com/shan-kmr/curbai" target="_blank" '
+    'style="color:#7A7F85!important;">code ↗</a></span></div>'
+    '<div style="font-size:.92rem;color:#4A4E54;margin:0 0 10px;">'
+    'Every cell of the city, decoded — raw open data, live movement, real buildings. '
+    'Zoom to split the tiles; click a street cell for its full card.</div>'
+    '<div style="height:1px;background:#E9EAEC;margin:0 0 14px;"></div>',
+    unsafe_allow_html=True)
 
 
-def render_temporal_strip(row: pd.Series) -> None:
-    """Compact 4-bar time-of-day strip for a single cell row."""
-    missing = [c for c in temporal.temporal_columns() if c not in row.index]
-    if missing:
-        return
-    st.markdown("#### Time-of-day activity")
-    st.caption("Category-derived estimate · 0–1 scale")
-    bars = pd.DataFrame(
-        {
-            "bucket": [temporal.bucket_display_name(b) for b in temporal.TEMPORAL_BUCKETS],
-            "activity": [float(row[f"activity_{b}"]) for b in temporal.TEMPORAL_BUCKETS],
-        }
-    )
-    st.bar_chart(bars, x="bucket", y="activity", height=180, use_container_width=True)
+# ---- the tiled map: one continuous res-5 → res-9 ladder ----
+from curbai.janusmap import janusmap  # noqa: E402
 
+# real NYC footprints (Plate II) — set after the public tiles upload
+BUILDINGS_URL = os.environ.get(
+    "JANUS_BUILDINGS_URL",
+    "https://huggingface.co/datasets/skay97/curbai-tiles/resolve/main/nyc_buildings.pmtiles")
 
-def render_catchment_summary(focus_h3: str, df: pd.DataFrame) -> None:
-    """Show 5/10/15-min walk-time reach for the focused cell."""
-    walk_times = compute_catchment(focus_h3, max_minutes=15)
-    if not walk_times:
-        return
-    summary = catchment.catchment_summary(walk_times, df)
-    st.markdown("#### Walk-time catchment")
-    st.caption("Road-network Dijkstra · 4.8 km/h (80 m/min)")
-    cols = st.columns(3)
-    for col, minutes in zip(cols, (5, 10, 15)):
-        bucket = summary[f"{minutes}_min"]
-        col.metric(
-            label=f"{minutes}-min walk",
-            value=f"{bucket['n_cells']} cells",
-            delta=f"{bucket['n_pois']:,} POIs",
-            delta_color="off",
-        )
+LODF = {6: DATADIR / "us_lod" / "r6.parquet",
+        7: DATADIR / "us_lod" / "r7.parquet",
+        8: DATADIR / "us_lod" / "r8.parquet"}
+TILE_LAYERS = {
+    "Structure · none": (None, ""),
+    "Population": ("kontur_population", "residents"),
+    "POIs / places": ("poi_count", "POIs"),
+    "Buildings": ("building_count", "buildings"),
+    "Movement · visits": ("wt_visit_count", "visits"),
+    "Roads": ("road_count", "road segments"),
+    "Night-lights": ("nightlight_2021", "brightness"),
+}
 
+@st.cache_data(show_spinner=False)
+def r5_payload(col: str | None) -> dict:
+    df = pd.read_parquet(US_R5)
+    # NYC focus (temporary): only regional res-5 parents ship to the client
+    df = df[(df.center_lat.between(40.35, 41.10)) & (df.center_lon.between(-74.50, -73.45))]
+    out = {"h3": df.h3_index.tolist(),
+           "lat": df.center_lat.round(4).tolist(),
+           "lon": df.center_lon.round(4).tolist(), "val": None}
+    if col and col in df.columns:
+        out["val"] = pd.to_numeric(df[col], errors="coerce").fillna(0).round(2).tolist()
+    return out
 
-def render_breakdown(
-    df: pd.DataFrame,
-    scoring_fn: Callable,
-    weights: dict[str, float],
-    score_label: str,
-    h3_id: str,
-) -> None:
-    row = df[df["h3_index"] == h3_id]
-    if len(row) == 0:
-        st.warning("Cell not found.")
-        return
-    row_df = row.iloc[[0]]
-    score_series, comps = scoring_fn(row_df)
-    score = float(score_series.iloc[0])
+@st.cache_data(show_spinner=False)
+def lod_vmax(col: str) -> dict:
+    con = duckdb.connect()
+    vm = {"5": float(pd.read_parquet(US_R5, columns=[col])[col].max() or 1)}
+    for res, f in LODF.items():
+        vm[str(res)] = float(con.execute(
+            f"SELECT max({col}) FROM read_parquet('{f.as_posix()}')").fetchone()[0] or 1)
+    vm["9"] = float(con.execute(
+        f"SELECT max({col}) FROM read_parquet('{US_R9_GLOB}')").fetchone()[0] or 1)
+    return vm
 
-    st.markdown(f"### `{h3_id[-12:]}`")
-    st.caption(f"{row['center_lat'].iloc[0]:.5f}, {row['center_lon'].iloc[0]:.5f}")
-    st.metric(label=score_label, value=f"{score * 100:.1f} / 100")
-
-    st.markdown("#### Score breakdown")
-    for name, w in weights.items():
-        val = float(comps[name].iloc[0])
-        st.progress(min(max(val, 0.0), 1.0), text=f"{name.replace('_', ' ')}  ·  w={w:.2f}  ·  {w * val:.3f}")
-
-    render_temporal_strip(row_df.iloc[0])
-
-    st.markdown("#### Raw features")
-    raw_cols = [c for c in [
-        "poi_count", "unique_categories", "category_entropy",
-        "intersection_count", "building_count", "transit_stop_count",
-        "amenity_count", "restaurant_count", "restaurant_count_kring",
-        "nightlife_count", "safety_count", "greenery_count", "shop_count",
-    ] if c in df.columns]
-    raw = row_df[raw_cols].T.rename(columns={row_df.index[0]: "value"}).reset_index().rename(columns={"index": "feature"})
-    st.dataframe(raw, hide_index=True, use_container_width=True)
-
-
-def render_brand_breakdown(
-    opp_df: pd.DataFrame, category: str, h3_id: str, pois_df: pd.DataFrame | None = None
-) -> None:
-    row = opp_df[opp_df["h3_index"] == h3_id]
-    if len(row) == 0:
-        st.warning("Cell not found.")
-        return
-    r = row.iloc[0]
-    cat_display = brand_planner.category_display_name(category)
-
-    st.markdown(f"### `{h3_id[-12:]}`")
-    st.caption(f"{r['center_lat']:.5f}, {r['center_lon']:.5f}")
-    st.metric(label=f"Opportunity for {cat_display}", value=f"{r['opportunity'] * 100:.1f} / 100")
-
-    st.markdown("#### White-space analysis")
-    col_a, col_b = st.columns(2)
-    col_a.metric(f"{cat_display} in this cell", int(r["cat_count_cell"]))
-    col_b.metric(f"{cat_display} within ~500m", int(r["cat_count_kring"]))
-
-    st.progress(
-        min(max(float(r["demand_proxy"]), 0.0), 1.0),
-        text=f"Demand proxy: {r['demand_proxy']:.2f}",
-    )
-
-    if r["cat_count_kring"] == 0:
-        st.success(f"No {cat_display} competitors within ~500 m — wide-open white space.")
-    elif r["cat_count_cell"] == 0:
-        st.info(f"No {cat_display} in this cell, but {int(r['cat_count_kring'])} nearby — moderate opportunity.")
+@st.cache_data(show_spinner=False)
+def fetch_chunk(res: int, parent: str, col: str | None) -> dict:
+    con = duckdb.connect()
+    vcol = f", {col} AS val" if col else ""
+    if res == 9:
+        q = (f"SELECT h3_index{vcol}, building_count, avg_floors, max_height "
+             f"FROM read_parquet('{US_R9_GLOB}') WHERE res5 = ?")
     else:
-        st.caption(f"{int(r['cat_count_cell'])} already here. Opportunity score reflects saturation.")
+        q = f"SELECT h3_index{vcol} FROM read_parquet('{LODF[res].as_posix()}') WHERE res5 = ?"
+    d = con.execute(q, [parent]).df()
+    out = {"h3": d.h3_index.tolist(),
+           "val": d.val.fillna(0).round(2).tolist() if col else None}
+    if res == 9:
+        out["bc"] = d.building_count.fillna(0).astype(int).tolist()
+        out["fl"] = d.avg_floors.fillna(0).round(1).tolist()
+        out["mh"] = d.max_height.fillna(0).round(0).tolist()
+    return out
 
-    if pois_df is not None:
-        competitors = brand_planner.nearest_competitors(
-            category, h3_id, pois_df, opp_df, k=5, max_m=1500
-        )
-        if competitors:
-            st.markdown("#### Nearest competitors")
-            for c in competitors:
-                st.markdown(f"- **{c['name']}**  · ~{c['distance_m']} m {c['direction']}")
-            st.caption(
-                "Open-data: names + Euclidean distance. First-party upgrade: "
-                "visit-share per competitor."
-            )
+@st.cache_data(ttl=18, show_spinner=False)
+def live_buses() -> list:
+    try:
+        import requests as rq
+        from google.transit import gtfs_realtime_pb2
+        r = rq.get("https://gtfsrt.prod.obanyc.com/vehiclePositions", timeout=8)
+        f = gtfs_realtime_pb2.FeedMessage(); f.ParseFromString(r.content)
+        out = []
+        for e in f.entity:
+            v = e.vehicle
+            if (v.position.latitude and 40.45 < v.position.latitude < 41.0
+                    and -74.35 < v.position.longitude < -73.6):
+                out.append([round(v.position.longitude, 5), round(v.position.latitude, 5),
+                            int(v.position.bearing or 0), v.vehicle.id or e.id])
+        return out
+    except Exception:
+        return []
 
+@st.cache_data(ttl=55, show_spinner=False)
+def live_bikes() -> list:
+    try:
+        import requests as rq
+        info = rq.get("https://gbfs.citibikenyc.com/gbfs/en/station_information.json", timeout=8).json()["data"]["stations"]
+        stat = rq.get("https://gbfs.citibikenyc.com/gbfs/en/station_status.json", timeout=8).json()["data"]["stations"]
+        cap = {s["station_id"]: (s["lat"], s["lon"], max(1, s.get("capacity", 1))) for s in info}
+        out = []
+        for s_ in stat:
+            c = cap.get(s_["station_id"])
+            if not c:
+                continue
+            la, lo, capn = c
+            out.append([round(lo, 5), round(la, 5),
+                        round(min(1.0, s_.get("num_bikes_available", 0) / capn), 2)])
+        return out
+    except Exception:
+        return []
 
-def render_similar(
-    df: pd.DataFrame, sim: similarity.SimilarityIndex, h3_id: str, score_col: str
-) -> None:
-    st.markdown("#### Similar cells elsewhere in SF")
-    neighbors = sim.query(h3_id, k=5)
-    if not neighbors:
-        st.info("No neighbors found.")
-        return
-    rows = []
-    for nb_h3, dist in neighbors:
-        nb = df[df["h3_index"] == nb_h3]
-        if len(nb) == 0:
-            continue
-        rows.append({
-            "h3": nb_h3[-8:],
-            "center": f"{nb['center_lat'].iloc[0]:.4f}, {nb['center_lon'].iloc[0]:.4f}",
-            "score": round(float(nb[score_col].iloc[0]) * 100, 1) if score_col in nb.columns else "—",
-            "top category": str(nb["top_category"].iloc[0]),
-            "dist": round(dist, 2),
-        })
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+layer_name = st.selectbox("Shade the tiles by", list(TILE_LAYERS), index=0, key="jm_layer")
+col, unit = TILE_LAYERS[layer_name]
 
+# chunk cache — refetch (cheap, cached) when the shade column changes
+if st.session_state.get("jm_col") != col:
+    st.session_state["jm_col"] = col
+    st.session_state["jm_chunks"] = {
+        res: {p: fetch_chunk(int(res), p, col) for p in parents}
+        for res, parents in st.session_state.get("jm_parents", {}).items()}
+st.session_state.setdefault("jm_parents", {})
+st.session_state.setdefault("jm_chunks", {})
 
-# ---------------------------------------------------------------------------
-# Address search + top-cell selector
-# ---------------------------------------------------------------------------
+focus = st.session_state.get("us_focus9")
+st.caption("New York · zoom to split the tiles (res 5 → 9) · click a tile to dive, "
+           "click a street-level cell for its card · buildings appear up close"
+           + (f" · shaded by {layer_name.lower()}" if col else ""))
 
+left, right = st.columns([2, 1], gap="large")
+with left:
+    @st.fragment(run_every=20)
+    def map_fragment():
+        live = {"buses": live_buses(), "bikes": live_bikes(), "ts": int(time.time())}
+        ev = janusmap(
+            r5=r5_payload(col),
+            chunks=st.session_state["jm_chunks"],
+            layer={"col": col, "label": unit, "vmax": (lod_vmax(col) if col else {})},
+            focus=st.session_state.get("us_focus9"),
+            buildings_url=BUILDINGS_URL, live=live, height=580, key="jm_map")
+        if ev and ev.get("nonce") != st.session_state.get("jm_nonce"):
+            st.session_state["jm_nonce"] = ev.get("nonce")
+            if ev.get("t") == "need":
+                res = str(ev["res"])
+                parents = st.session_state["jm_parents"].setdefault(res, set())
+                chunks = st.session_state["jm_chunks"].setdefault(res, {})
+                for p in ev.get("parents", []):
+                    if p not in parents:
+                        parents.add(p)
+                        chunks[p] = fetch_chunk(int(res), p, col)
+                st.rerun()
+            elif ev.get("t") == "select":
+                st.session_state["us_focus9"] = ev.get("h3")
+                st.rerun()
+    map_fragment()
+with right:
+    if focus:
+        kids = load_us_children(h3.h3_to_parent(focus, 5))
+        frow = kids[kids.h3_index == focus]
+        if len(frow):
+            render_us_card(frow.iloc[0])
+        st.caption("Raw open data, keyed to one H3 cell. No scores.")
+    else:
+        df5 = load_us_overview()
+        tot = {"Res-5 tiles": f"{len(df5):,}",
+               "Res-9 inside": f"{int(df5.n_res9.sum()):,}",
+               "POIs": f"{int(df5.poi_count.fillna(0).sum()):,}",
+               "Buildings": f"{int(df5.building_count.fillna(0).sum()):,}"}
+        if "fars_crashes" in df5.columns:
+            tot["Fatal crashes 22–24"] = f"{int(df5.fars_crashes.fillna(0).sum()):,}"
+        rows = "".join(f'<div class="jx-row"><span class="k">{k}</span>'
+                       f'<span class="v"><b>{v}</b></span></div>' for k, v in tot.items())
+        st.markdown(f"""
+        <div class="jx-card">
+          <div class="jx-cid">United States · tiled</div>
+          <div class="jx-lab" style="margin-top:6px">◆ On this map</div>
+          {rows}
+          <div class="jx-lab jx-sec">◆ How it works</div>
+          <div class="jx-txt">Zoom and the tiles split — res-5 country tiles down to
+          174 m street cells, with buildings rising up close. Click a street cell
+          and its full raw-data card opens here.</div>
+        </div>""", unsafe_allow_html=True)
+        st.caption("Raw open data, keyed to H3. No scores.")
 
-def render_controls(df: pd.DataFrame, score_col: str, key_prefix: str) -> None:
-    addr_col, top_col = st.columns([3, 2])
-    with addr_col:
-        addr = st.text_input("Search an SF address", key=f"addr_{key_prefix}", placeholder="e.g. 1455 Market Street")
-        if addr:
-            latlon = geocode_sf(addr)
-            if latlon is None:
-                st.warning("Address not found.")
-            else:
-                h3_id = nearest_cell(df, *latlon)
-                if h3_id:
-                    set_focus(h3_id)
-    with top_col:
-        if score_col in df.columns:
-            top_options = ["—"] + [
-                f"#{i+1}  ({r[score_col]:.2f})  {r['h3_index'][-8:]}"
-                for i, r in df.nlargest(10, score_col).reset_index().iterrows()
-            ]
-            top_n = st.selectbox("Jump to top-scoring cell", options=top_options, key=f"top_{key_prefix}")
-            if top_n != "—":
-                short = top_n.split()[-1]
-                match = df[df["h3_index"].str.endswith(short)]
-                if len(match) > 0:
-                    set_focus(str(match["h3_index"].iloc[0]))
-
-
-# ---------------------------------------------------------------------------
-# Static tab renderer (Site Intelligence, Neighborhood Character)
-# ---------------------------------------------------------------------------
-
-
-def render_static_tab(
-    df: pd.DataFrame,
-    sim: similarity.SimilarityIndex,
-    score_col: str,
-    title: str,
-    tagline: str,
-    scoring_fn: Callable,
-    weights: dict[str, float],
-    key: str,
-) -> None:
-    st.markdown(f"### {title}")
-    st.caption(tagline)
-
-    left, right = st.columns([2, 1], gap="large")
-    with left:
-        render_controls(df, score_col, key)
-        focus_h3 = st.session_state.get("focus_h3")
-        walk_times = compute_catchment(focus_h3) if focus_h3 else None
-        deck = build_deck(df, score_col, title, focus_h3, catchment_walk_times=walk_times)
-        event = st.pydeck_chart(deck, use_container_width=True, height=580, on_select="rerun", selection_mode="single-object", key=f"deck_{key}")
-        new_focus = parse_pydeck_selection(event, focus_h3)
-        if new_focus:
-            set_focus(new_focus)
-            st.rerun()
-        st.caption(
-            f"Click any hex to select. {len(df):,} H3 res-9 cells. Cocoa = low, cream = high. "
-            "Selected cell tints a teal walk-time ring (5/10/15 min)."
-        )
-
-    with right:
-        focus_h3 = st.session_state.get("focus_h3")
-        if focus_h3 is None:
-            focus_h3 = str(df.nlargest(1, score_col)["h3_index"].iloc[0])
-            st.caption("Showing top-scoring cell. Click the map to inspect others.")
-        else:
-            st.caption("Selected cell. Click another hex to change.")
-        render_breakdown(df, scoring_fn, weights, title, focus_h3)
-        st.markdown("---")
-        render_catchment_summary(focus_h3, df)
-        st.markdown("---")
-        render_similar(df, sim, focus_h3, score_col)
-
-
-# ---------------------------------------------------------------------------
-# Brand Location Planner tab
-# ---------------------------------------------------------------------------
-
-
-def render_brand_planner_tab(
-    base_df: pd.DataFrame,
-    sim: similarity.SimilarityIndex,
-) -> None:
-    st.markdown("### Brand Location Planner")
-    st.caption("Pick a business category. See where demand is high but supply is thin.")
-
-    categories = get_categories()
-    if not categories:
-        st.error("No category data found. Run scripts/build_sf.py.")
-        return
-
-    # Display-friendly names.
-    cat_display_map = {c: brand_planner.category_display_name(c) for c in categories}
-    display_names = [cat_display_map[c] for c in categories]
-
-    left, right = st.columns([2, 1], gap="large")
-
-    with left:
-        cat_col, addr_col = st.columns([2, 3])
-        with cat_col:
-            selected_display = st.selectbox(
-                "Business category",
-                options=display_names,
-                index=0,
-                key="brand_cat",
-            )
-            # Reverse lookup.
-            selected_cat = categories[display_names.index(selected_display)]
-
-        with addr_col:
-            addr = st.text_input("Search an SF address", key="addr_brand", placeholder="e.g. 1455 Market Street")
-            if addr:
-                latlon = geocode_sf(addr)
-                if latlon is None:
-                    st.warning("Address not found.")
-                else:
-                    h3_id = nearest_cell(base_df, *latlon)
-                    if h3_id:
-                        set_focus(h3_id)
-
-        # Compute opportunity scores for selected category.
-        opp_df = brand_planner.compute_opportunity(selected_cat, base_df)
-
-        # Top-cell selector from opportunity scores.
-        top_options = ["—"] + [
-            f"#{i+1}  ({r['opportunity']:.2f})  {r['h3_index'][-8:]}"
-            for i, r in opp_df.nlargest(10, "opportunity").reset_index().iterrows()
-        ]
-        top_n = st.selectbox("Jump to highest opportunity", options=top_options, key="top_brand")
-        if top_n != "—":
-            short = top_n.split()[-1]
-            match = opp_df[opp_df["h3_index"].str.endswith(short)]
-            if len(match) > 0:
-                set_focus(str(match["h3_index"].iloc[0]))
-
-        focus_h3 = st.session_state.get("focus_h3")
-        walk_times = compute_catchment(focus_h3) if focus_h3 else None
-        deck = build_deck(
-            opp_df,
-            "opportunity",
-            f"Opportunity: {selected_display}",
-            focus_h3,
-            catchment_walk_times=walk_times,
-        )
-        event = st.pydeck_chart(deck, use_container_width=True, height=580, on_select="rerun", selection_mode="single-object", key="deck_brand")
-        new_focus = parse_pydeck_selection(event, focus_h3)
-        if new_focus:
-            set_focus(new_focus)
-            st.rerun()
-
-        # Summary stats.
-        n_zero = int((opp_df["cat_count_cell"] == 0).sum())
-        n_total = int(opp_df["cat_count_cell"].sum())
-        st.caption(
-            f"{selected_display}: **{n_total}** locations across **{len(opp_df) - n_zero}** cells. "
-            f"**{n_zero}** cells have zero — potential white space."
-        )
-
-    with right:
-        focus_h3 = st.session_state.get("focus_h3")
-        if focus_h3 is None:
-            focus_h3 = str(opp_df.nlargest(1, "opportunity")["h3_index"].iloc[0])
-            st.caption("Showing top opportunity cell. Click the map to inspect.")
-        else:
-            st.caption("Selected cell.")
-        try:
-            pois_df = get_pois()
-        except FileNotFoundError:
-            pois_df = None
-        render_brand_breakdown(opp_df, selected_cat, focus_h3, pois_df=pois_df)
-        st.markdown("---")
-        render_catchment_summary(focus_h3, base_df)
-        st.markdown("---")
-        render_similar(base_df, sim, focus_h3, "score_site")
-
-
-# ---------------------------------------------------------------------------
-# Temporal Patterns tab
-# ---------------------------------------------------------------------------
-
-
-def render_temporal_tab(df: pd.DataFrame, sim: similarity.SimilarityIndex) -> None:
-    st.markdown("### Temporal Patterns")
-    st.caption(
-        "When is this block alive? A category-derived activity profile for "
-        "four time buckets. Open-data primitive — the first-party version is "
-        "actual device-density per cell per hour."
-    )
-
-    temporal_cols = temporal.temporal_columns()
-    missing = [c for c in temporal_cols if c not in df.columns]
-    if missing:
-        st.error(
-            f"Missing temporal columns {missing}. Re-run `python scripts/build_sf.py`."
-        )
-        return
-
-    left, right = st.columns([2, 1], gap="large")
-
-    with left:
-        bucket_labels = {b: temporal.bucket_display_name(b) for b in temporal.TEMPORAL_BUCKETS}
-        default_bucket = "evening"
-        selected_label = st.radio(
-            "Time bucket",
-            options=[bucket_labels[b] for b in temporal.TEMPORAL_BUCKETS],
-            index=temporal.TEMPORAL_BUCKETS.index(default_bucket),
-            horizontal=True,
-            key="temporal_bucket",
-        )
-        selected_bucket = next(
-            b for b, lbl in bucket_labels.items() if lbl == selected_label
-        )
-        score_col = f"activity_{selected_bucket}"
-
-        render_controls(df, score_col, "temporal")
-        focus_h3 = st.session_state.get("focus_h3")
-        walk_times = compute_catchment(focus_h3) if focus_h3 else None
-        deck = build_deck(
-            df,
-            score_col,
-            f"Activity — {bucket_labels[selected_bucket]}",
-            focus_h3,
-            catchment_walk_times=walk_times,
-        )
-        event = st.pydeck_chart(
-            deck,
-            use_container_width=True,
-            height=580,
-            on_select="rerun",
-            selection_mode="single-object",
-            key="deck_temporal",
-        )
-        new_focus = parse_pydeck_selection(event, focus_h3)
-        if new_focus:
-            set_focus(new_focus)
-            st.rerun()
-        st.caption(
-            "Morning = transit + intersections + shops. "
-            "Midday = restaurants + shops + amenities. "
-            "Evening = nightlife + restaurants + amenities. "
-            "Late night = nightlife + restaurants."
-        )
-
-    with right:
-        focus_h3 = st.session_state.get("focus_h3")
-        if focus_h3 is None:
-            focus_h3 = str(df.nlargest(1, score_col)["h3_index"].iloc[0])
-            st.caption("Showing top-activity cell. Click the map to inspect others.")
-        else:
-            st.caption("Selected cell.")
-
-        row = df[df["h3_index"] == focus_h3]
-        if len(row) > 0:
-            r = row.iloc[0]
-            st.markdown(f"### `{focus_h3[-12:]}`")
-            st.caption(f"{r['center_lat']:.5f}, {r['center_lon']:.5f}")
-            st.metric(
-                label=f"Activity — {bucket_labels[selected_bucket]}",
-                value=f"{float(r[score_col]) * 100:.1f} / 100",
-            )
-            render_temporal_strip(r)
-
-        st.markdown("---")
-        render_catchment_summary(focus_h3, df)
-        st.markdown("---")
-        render_similar(df, sim, focus_h3, score_col)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    init_state()
-
-    if not SCORED_PATH.exists():
-        st.error(f"Missing `{SCORED_PATH.name}`. Run the data pipeline first.")
-        return
-
-    df = get_data()
-    sim, _ = get_similarity_index(df)
-
-    st.markdown("# CurbIndex")
-    st.caption(
-        "Geospatial intelligence for urban mobility, built on open data. "
-        "A prototype demonstrating what becomes possible when you can score "
-        "every block in a city for commercial and mobility readiness — "
-        "using only open-source data. See the Methodology page in the sidebar."
-    )
-    st.markdown("")
-
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Site Intelligence",
-        "Brand Location Planner",
-        "Neighborhood Character",
-        "Temporal Patterns",
-    ])
-
-    with tab1:
-        render_static_tab(
-            df, sim,
-            score_col="score_site",
-            title="Site Intelligence",
-            tagline="Where should a business open? Composite score from foot traffic, accessibility, commercial vibrancy, and demographic density.",
-            scoring_fn=scoring.site_intelligence_score,
-            weights=scoring.SITE_WEIGHTS,
-            key="site",
-        )
-
-    with tab2:
-        render_brand_planner_tab(df, sim)
-
-    with tab3:
-        render_static_tab(
-            df, sim,
-            score_col="score_character",
-            title="Neighborhood Character",
-            tagline="What is this block's livability and commercial identity? Walkability, green space, safety, evening vibrancy, and mixed-use character.",
-            scoring_fn=scoring.neighborhood_character_score,
-            weights=scoring.CHARACTER_WEIGHTS,
-            key="character",
-        )
-
-    with tab4:
-        render_temporal_tab(df, sim)
-
-
-if __name__ == "__main__":
-    main()

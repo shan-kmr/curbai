@@ -23,3 +23,12 @@ data/*.pkl
 # Secrets
 .streamlit/secrets.toml
 .env
+.venv/
+
+# ACS build caches (source files; re-downloaded by scripts/build_acs.py)
+data/acs_sf_2022/
+data/cb_2022_us_tract_500k/
+data/cb_2022_us_tract_500k.zip
+
+# US res-9 detail shards (613 MB) — HF Space only; rebuild: scripts/build_us.py detail
+data/us_r9/
